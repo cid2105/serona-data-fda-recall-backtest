@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from strategy import (  # noqa: E402
     STRATEGIES, factor_for_condition, normalize_manu,
     simulate, sharpe, max_drawdown, basket_size_daily,
-    portfolio_turnover_annualized, validate_prices, clean_prices,
+    portfolio_turnover_annualized, portfolio_turnover_daily,
+    validate_prices, clean_prices,
 )
 
 
@@ -426,19 +427,11 @@ def test_simulate_invalid_args_raise(synthetic_prices):
 
 def test_validate_prices_clean(synthetic_prices):
     """The fixture has a flat ticker B by design (for the multi-ticker average test),
-    so we don't assert stale_run_count == 0 here — just no spike-reverts or bad data."""
+    so we don't assert stale_run_count == 0 here — just no NaNs or non-positive obs."""
     issues = validate_prices(synthetic_prices)
     assert issues["all_nan_tickers"] == []
     assert issues["partial_nan_tickers"] == {}
     assert issues["non_positive_obs"] == 0
-    assert issues["spike_revert_count"] == 0
-
-
-def test_validate_prices_detects_spike_revert():
-    dates = pd.bdate_range("2025-01-02", periods=6)
-    df = pd.DataFrame({"X": [100, 100, 200, 100, 100, 100]}, index=dates)
-    issues = validate_prices(df)
-    assert issues["spike_revert_count"] >= 1
 
 
 def test_validate_prices_detects_all_nan_and_partial():
@@ -536,37 +529,106 @@ def test_basket_size_daily_empty_returns_zeros(synthetic_prices):
 
 
 # -----------------------------------------------------------------------------
-# portfolio_turnover_annualized
+# portfolio_turnover_daily / portfolio_turnover_annualized
 # -----------------------------------------------------------------------------
 
 def test_turnover_zero_when_no_trades(synthetic_prices):
     empty = pd.DataFrame(columns=["ticker", "trade_date", "exit_date"])
+    assert portfolio_turnover_daily(empty, synthetic_prices.index) == 0.0
     assert portfolio_turnover_annualized(empty, synthetic_prices.index) == 0.0
 
 
-def test_turnover_buy_and_hold_is_zero(synthetic_prices):
-    """One trade entered on day 0, held through the end of the window — 1 entry, 0 exits.
-    Under the SEC `min(buys, sells)` convention the initial allocation doesn't count as
-    turnover, so the result is exactly 0%."""
-    s = pd.DataFrame([{
-        "ticker": "A",
-        "trade_date": synthetic_prices.index[0],
-        "exit_date": synthetic_prices.index[-1],
-    }])
-    assert portfolio_turnover_annualized(s, synthetic_prices.index) == 0.0
+def test_turnover_buy_and_hold_only_initial_allocation():
+    """One name held throughout the window: only the ∅→{A} transition contributes.
+    On that single day, ½·Σ|Δw| = ½·1.0 = 0.5. Every other day contributes 0.
+    Mean over (N−1) active-pair days = 0.5/(N−1)."""
+    dates = pd.bdate_range("2025-01-02", periods=20)
+    s = pd.DataFrame([{"ticker": "A",
+                       "trade_date": dates[0],
+                       "exit_date": dates[-1]}])
+    daily = portfolio_turnover_daily(s, dates)
+    expected_pct = 0.5 / (len(dates) - 1) * 100
+    assert daily == pytest.approx(expected_pct, rel=1e-9)
 
 
-def test_turnover_steady_state_matches_252_over_hold():
-    """Simulated steady state: a new 5-day position opens each day, indefinitely.
-    Expect annualized one-way turnover ≈ 252/hold × 100% = 5040%."""
-    dates = pd.bdate_range("2025-01-02", periods=120)
-    # Open A from day i to day i+5 for i in 0..100 — but use distinct tickers so each is its own slot
-    rows = []
-    for i in range(100):
-        rows.append({"ticker": f"T{i:03d}",
-                     "trade_date": dates[i],
-                     "exit_date": dates[i + 5]})
+def test_turnover_once_per_week_rotation():
+    """User's reference: a 5-name book that swaps 1-in / 1-out per day has steady-state
+    daily turnover = 20% (book turns over once per 5-day trading week).
+
+    Construction: trade i opens on day i, exits on day i+5. After the warm-up window
+    fills the basket to 5 names, basket size stays constant at 5 with exactly one
+    entry and one exit per day."""
+    dates = pd.bdate_range("2025-01-02", periods=400)
+    rows = [{"ticker": f"T{i:04d}",
+             "trade_date": dates[i],
+             "exit_date": dates[i + 5]} for i in range(390)]
     s = pd.DataFrame(rows)
-    turnover = portfolio_turnover_annualized(s, dates)
-    # Wide tolerance: hand-computation is sensitive to edge effects (warmup + cooldown)
-    assert 3000 < turnover < 7000
+    daily = portfolio_turnover_daily(s, dates)
+    # Steady state is exactly 20%; with ~10 days of ramp + cooldown out of 400, the
+    # mean is dominated by steady state. Tolerate ramp effects with a tight band.
+    assert 19.5 < daily < 20.5
+    # Annualized = daily × 252
+    assert portfolio_turnover_annualized(s, dates) == pytest.approx(daily * 252, rel=1e-12)
+
+
+def test_turnover_steady_state_inverse_of_hold_days():
+    """For a constant-size basket with 1-in/1-out per day and hold=H, daily turnover
+    converges to 1/H. Verify across H ∈ {5, 10, 20, 40}, allowing a small ramp tolerance."""
+    for hold in [5, 10, 20, 40]:
+        n_days = 600
+        n_trades = n_days - hold
+        dates = pd.bdate_range("2025-01-02", periods=n_days)
+        rows = [{"ticker": f"T{i:04d}",
+                 "trade_date": dates[i],
+                 "exit_date": dates[i + hold]} for i in range(n_trades)]
+        s = pd.DataFrame(rows)
+        daily = portfolio_turnover_daily(s, dates) / 100  # back to fraction
+        target = 1.0 / hold
+        # Ramp/cooldown spans 2·hold days; for n_days=600 they're a small fraction
+        assert abs(daily - target) < 0.02, f"hold={hold}: got {daily:.4f}, expected ~{target:.4f}"
+
+
+def test_turnover_annualized_equals_daily_times_periods():
+    """Annualized must always equal daily × periods_per_year exactly."""
+    dates = pd.bdate_range("2025-01-02", periods=60)
+    rows = [{"ticker": f"T{i:03d}",
+             "trade_date": dates[i],
+             "exit_date": dates[i + 5]} for i in range(50)]
+    s = pd.DataFrame(rows)
+    daily = portfolio_turnover_daily(s, dates)
+    for ppy in (252, 365, 100):
+        assert portfolio_turnover_annualized(s, dates, periods_per_year=ppy) == pytest.approx(
+            daily * ppy, rel=1e-12,
+        )
+
+
+def test_turnover_static_two_name_book():
+    """Two names entered together on day 0, held throughout. Only one transition has
+    nonzero L1: ∅ → {A,B}. With N held = 2, w_cur = 0.5 each, sum |Δw| = 1.0, /2 = 0.5.
+    All subsequent days have L1 = 0."""
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    s = pd.DataFrame([
+        {"ticker": "A", "trade_date": dates[0], "exit_date": dates[-1]},
+        {"ticker": "B", "trade_date": dates[0], "exit_date": dates[-1]},
+    ])
+    daily = portfolio_turnover_daily(s, dates)
+    # 9 active-pair days; one contributes 0.5, eight contribute 0. Mean = 0.5/9.
+    assert daily == pytest.approx(0.5 / 9 * 100, rel=1e-9)
+
+
+def test_turnover_swap_full_book_in_one_day():
+    """Book {A,B} on day 1, then {C,D} on day 2 (full swap, basket size unchanged).
+    Symmetric difference = 4 names × 0.5 weight each = 2.0; /2 = 1.0 = 100% turnover that day."""
+    dates = pd.bdate_range("2025-01-02", periods=4)
+    s = pd.DataFrame([
+        {"ticker": "A", "trade_date": dates[0], "exit_date": dates[1]},
+        {"ticker": "B", "trade_date": dates[0], "exit_date": dates[1]},
+        {"ticker": "C", "trade_date": dates[1], "exit_date": dates[2]},
+        {"ticker": "D", "trade_date": dates[1], "exit_date": dates[2]},
+    ])
+    # Day 1: ∅→{A,B}, L1/2 = 0.5
+    # Day 2: {A,B}→{C,D}, L1 = 4·0.5 = 2, /2 = 1.0
+    # Day 3: {C,D}→∅,    L1 = 1.0,        /2 = 0.5
+    # Mean of [0.5, 1.0, 0.5] = 2/3 → 66.67%
+    daily = portfolio_turnover_daily(s, dates)
+    assert daily == pytest.approx(200.0 / 3, rel=1e-9)

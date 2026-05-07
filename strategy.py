@@ -241,51 +241,72 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
 # Risk metrics
 # -----------------------------------------------------------------------------
 
-def portfolio_turnover_annualized(s_trades: pd.DataFrame, trading_days: pd.DatetimeIndex,
-                                  periods_per_year: int = 252) -> float:
-    """Annualized one-way turnover (%) of the equal-weight short basket.
-
-    Uses the SEC mutual-fund convention: ``turnover = min(buys, sells) / avg_NAV``, annualized.
-    For our equal-weight binary basket, "1 unit of NAV" ↔ "1 name", so:
-      - buys per period  = total entries (names added vs the prior day)
-      - sells per period = total exits   (names dropped vs the prior day)
-      - avg_NAV per period = avg basket size on active days
-
-    The ``min(buys, sells)`` makes the initial-allocation entry not count as turnover
-    (buy-and-hold has 1 entry, 0 exits → min = 0 → turnover = 0). In steady state where
-    entries ≈ exits, the result matches the average formula.
-
-    Reference: a strategy with ``hold_days = 40`` in steady state has ≈ 252/40 = 6.3
-    round-trips per name per year, i.e. ~630% annualized one-way turnover.
-    Returns 0.0 if the book never holds anything.
-    """
+def _daily_basket_membership(s_trades: pd.DataFrame,
+                             trading_days: pd.DatetimeIndex) -> list[frozenset]:
+    """Per-day basket membership. A trade with (trade_date=td, exit_date=ed) is held on
+    days (td, ed]. Returns a list aligned with ``trading_days``."""
     if s_trades.empty:
-        return 0.0
+        return [frozenset()] * len(trading_days)
     starts = s_trades["trade_date"].to_numpy()
     ends = s_trades["exit_date"].to_numpy()
     tickers = s_trades["ticker"].to_numpy()
     td = trading_days.to_numpy()
-
-    prev_set: set = set()
-    n_active = 0
-    total_entries = 0
-    total_exits = 0
-    sum_basket = 0
+    out: list[frozenset] = []
     for d in td:
         active = (d > starts) & (d <= ends)
-        cur = set(np.unique(tickers[active])) if active.any() else set()
-        if cur or prev_set:
-            n_active += 1
-            sum_basket += len(cur)
-            total_entries += len(cur - prev_set)
-            total_exits += len(prev_set - cur)
-        prev_set = cur
+        out.append(frozenset(np.unique(tickers[active])) if active.any() else frozenset())
+    return out
 
-    if n_active == 0 or sum_basket == 0:
+
+def portfolio_turnover_daily(s_trades: pd.DataFrame,
+                             trading_days: pd.DatetimeIndex) -> float:
+    """Average daily turnover (%) of the equal-weight short basket.
+
+    Daily turnover on day t is ``½ · Σ_i |w_i(t) − w_i(t−1)|``, where ``w_i = 1/N`` for held
+    names and 0 otherwise. The ½ factor normalizes a complete book swap to 100%.
+
+    Reference: a 5-name book that swaps 1 name in / 1 name out each day has
+    ``daily turnover = 20%`` — the book turns over once per (5-day) trading week.
+    Steady-state shorthand: ``daily turnover ≈ 1 / hold_days`` for a constant-size basket
+    with no early exits.
+
+    Days where both yesterday's and today's baskets are empty are excluded from the mean.
+    Returns 0.0 if the book never holds anything.
+    """
+    if s_trades.empty:
         return 0.0
-    avg_basket = sum_basket / n_active
-    period_turnover = min(total_entries, total_exits) / avg_basket
-    return period_turnover * (periods_per_year / n_active) * 100.0
+    baskets = _daily_basket_membership(s_trades, trading_days)
+
+    daily: list[float] = []
+    for i in range(1, len(baskets)):
+        prev, cur = baskets[i - 1], baskets[i]
+        if not prev and not cur:
+            continue
+        n_prev, n_cur = len(prev), len(cur)
+        w_prev = 1.0 / n_prev if n_prev else 0.0
+        w_cur = 1.0 / n_cur if n_cur else 0.0
+        common = prev & cur
+        only_prev = prev - cur
+        only_cur = cur - prev
+        l1 = (len(common) * abs(w_prev - w_cur)
+              + len(only_prev) * w_prev
+              + len(only_cur) * w_cur)
+        daily.append(l1 / 2.0)
+
+    if not daily:
+        return 0.0
+    return float(np.mean(daily) * 100.0)
+
+
+def portfolio_turnover_annualized(s_trades: pd.DataFrame, trading_days: pd.DatetimeIndex,
+                                  periods_per_year: int = 252) -> float:
+    """Annualized turnover (%): ``portfolio_turnover_daily × periods_per_year``.
+
+    Steady-state shorthand (constant-size basket, no early exits):
+    ``annualized ≈ 252 / hold_days × 100%``.
+    Returns 0.0 if the book never holds anything.
+    """
+    return portfolio_turnover_daily(s_trades, trading_days) * periods_per_year
 
 
 def basket_size_daily(s_trades: pd.DataFrame, trading_days: pd.DatetimeIndex) -> pd.Series:

@@ -18,7 +18,8 @@ import alphalens as al
 from strategy import (
     STRATEGIES, factor_for_condition, normalize_manu,
     simulate, sharpe, max_drawdown, basket_size_daily,
-    portfolio_turnover_annualized, validate_prices, clean_prices,
+    portfolio_turnover_annualized, portfolio_turnover_daily,
+    validate_prices, clean_prices,
 )
 
 warnings.filterwarnings("ignore")
@@ -266,7 +267,8 @@ with tab_strategy:
         ann_ret_bal = daily_bal.mean() * 252 * 100
         ann_vol_bal = daily_bal.std(ddof=1) * np.sqrt(252) * 100
         dd_bal = max_drawdown(cum_bal)
-        turnover_pct = portfolio_turnover_annualized(s, daily_short.index)
+        turnover_daily_pct = portfolio_turnover_daily(s, daily_short.index)
+        turnover_annual_pct = portfolio_turnover_annualized(s, daily_short.index)
 
         # Daily basket size (within the trimmed active window) — average across days that
         # actually had a position (gives "when the book is on, how big is it on average").
@@ -289,7 +291,7 @@ with tab_strategy:
                   help="Unique tickers with at least one model prediction — the pool the "
                        "strategy can short before threshold gating.")
 
-        d1, d2, d3, d4 = st.columns(4)
+        d1, d2, d3, d4, d5 = st.columns(5)
         d1.metric("Balanced ann. return",
                   f"{ann_ret_bal:+.2f}%",
                   help="mean(daily_balanced) × 252 — additive (sum-of-returns) annualization.")
@@ -299,10 +301,13 @@ with tab_strategy:
         d3.metric("Balanced max drawdown",
                   f"{dd_bal:+.2f}%",
                   help="Largest peak-to-trough drop on the balanced cumulative-return curve.")
-        d4.metric("Annualized turnover",
-                  f"{turnover_pct:,.0f}%",
-                  help="One-way: avg fraction of basket changing per day, ×252. "
-                       "Reference: ~252/hold_days × 100% in steady state.")
+        d4.metric("Daily turnover",
+                  f"{turnover_daily_pct:.2f}%",
+                  help="Avg over active days of ½·Σ|Δw|. Reference: 20% means the book "
+                       "turns over once a week (≈ 1/hold_days in steady state).")
+        d5.metric("Annualized turnover",
+                  f"{turnover_annual_pct:,.0f}%",
+                  help="Daily turnover × 252. Reference: ~252/hold_days × 100% in steady state.")
 
         # Cumulative return + drawdown — plotly, interactive
         fig = make_subplots(rows=2, cols=1, row_heights=[0.66, 0.34],

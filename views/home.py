@@ -75,7 +75,7 @@ with c_left:
         f"""
         <div style="{_card_style}">
           <div style="font-weight: 700; font-size: 1.1rem; color: {BRAND_BLUE}; margin-bottom: 0.4rem;">
-            <a href="/threshold target="_self">Threshold Backtest</a>
+            <a href="/threshold target="_blank">Threshold Backtest</a>
           </div>
           <div style="color: #334155; font-size: 0.92rem; line-height: 1.5;">
             Each AE-date signal whose factor exceeds the entry threshold opens a short
@@ -94,7 +94,7 @@ with c_right:
         f"""
         <div style="{_card_style}">
           <div style="font-weight: 700; font-size: 1.1rem; color: {BRAND_BLUE_LIGHT}; margin-bottom: 0.4rem;">
-            <a href="/bottom-k" target="_self">Bottom-K Backtest</a>
+            <a href="/bottom-k" target="_blank">Bottom-K Backtest</a>
           </div>
           <div style="color: #334155; font-size: 0.92rem; line-height: 1.5;">
             Each AE date, rank tickers by the trigger-rule factor (using <em>min</em> for

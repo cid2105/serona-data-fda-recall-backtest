@@ -36,7 +36,7 @@ with st.sidebar:
     rule_keys = list(BOTTOM_K_RULES.keys())
     cond = st.selectbox(
         "Short Trigger Rule (ranking factor)", rule_keys,
-        index=rule_keys.index("p0"),
+        index=rule_keys.index("p2"),
         help="Single-class rules (p0, p1, p2) rank by that probability column. "
              "Multi-class rules (min(p0, p1), min(p0, p1, p2)) take the min across the "
              "listed columns. Bottom-K shorts the K names with the lowest factor on "
@@ -50,7 +50,7 @@ with st.sidebar:
         help="Per signal_date, short the K tickers with the lowest factor.",
     )
     entry_delay = st.number_input("Entry delay (trading days after AE date)", 1, 60, 20, 1)
-    hold_days = st.number_input("Holding period (trading days)", 1, 120, 40, 1)
+    hold_days = st.number_input("Holding period (trading days)", 1, 120, 10, 1)
 
 
 # ---------------------------------------------------------------------------

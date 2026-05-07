@@ -66,6 +66,30 @@ def factor_for_condition(sig: pd.DataFrame, condition: str) -> pd.Series:
     raise ValueError(f"unknown condition: {condition}")
 
 
+# Bottom-K trigger rules. Each rule names a continuous ranking factor; bottom-K shorts
+# the K names with the LOWEST factor on each signal_date. Single-class rules collapse to
+# that probability column; multi-class rules take the min across the listed columns.
+BOTTOM_K_RULES: dict[str, str] = {
+    "p0":              "p0",
+    "p1":              "p1",
+    "p2":              "p2",
+    "min(p0, p1)":     "min(p0, p1)",
+    "min(p0, p1, p2)": "min(p0, p1, p2)",
+}
+
+
+def factor_for_bottom_k(sig: pd.DataFrame, condition: str) -> pd.Series:
+    """Continuous factor for bottom-K ranking. ``condition`` must be a key of
+    ``BOTTOM_K_RULES`` (e.g. ``"p0"``, ``"min(p0, p1)"``, ``"min(p0, p1, p2)"``)."""
+    p0, p1, p2 = sig["prob_class_0"], sig["prob_class_1"], sig["prob_class_2"]
+    if condition == "p0": return p0
+    if condition == "p1": return p1
+    if condition == "p2": return p2
+    if condition == "min(p0, p1)":     return pd.concat([p0, p1], axis=1).min(axis=1)
+    if condition == "min(p0, p1, p2)": return pd.concat([p0, p1, p2], axis=1).min(axis=1)
+    raise ValueError(f"unknown bottom-K rule: {condition}")
+
+
 # -----------------------------------------------------------------------------
 # Price-data validation and cleaning
 # -----------------------------------------------------------------------------
@@ -196,6 +220,24 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
         if cand_exit_idx < exit_idx_arr[k]:
             exit_idx_arr[k] = cand_exit_idx
 
+    return _compute_pnl_and_daily_series(
+        s, prices, entry_idx_arr, exit_idx_arr, tk_col, balanced_weight,
+    )
+
+
+def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
+                                  tk_col, balanced_weight):
+    """Shared P&L computation for both threshold and bottom-K simulators.
+
+    `s` is the selected per-trade signal table (with `_factor` column). `entry_idx_arr` and
+    `exit_idx_arr` are aligned arrays of indices into `prices.index`. Returns the per-trade
+    table (with trade_date / exit_date / stock_ret / short_ret), the daily short-book
+    return series, and the daily balanced-portfolio return series.
+    """
+    trading_days = prices.index
+    n_days = len(trading_days)
+
+    s = s.copy()
     s["trade_date"] = trading_days[entry_idx_arr]
     s["exit_date"] = trading_days[exit_idx_arr]
 
@@ -216,17 +258,18 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
     basket_ret = np.where(np.isnan(basket_ret), 0.0, basket_ret)
     short_book_daily = pd.Series(-basket_ret, index=trading_days)
 
-    if "SPY" in col_idx:
+    if "SPY" in prices.columns:
         spy_ret = prices["SPY"].pct_change(fill_method=None).fillna(0).to_numpy()
-        balanced_daily = pd.Series(
-            balanced_weight * short_book_daily.to_numpy() + (1 - balanced_weight) * spy_ret,
-            index=trading_days,
-        )
     else:
-        balanced_daily = short_book_daily.copy()
+        # Cash benchmark: long leg returns 0 if SPY isn't in the price table.
+        # Keeps `balanced_weight` semantics consistent (balanced = w·short + (1−w)·0).
+        spy_ret = np.zeros(n_days)
+    balanced_daily = pd.Series(
+        balanced_weight * short_book_daily.to_numpy() + (1 - balanced_weight) * spy_ret,
+        index=trading_days,
+    )
 
-    # Per-trade view: compound stock-return between actual entry and actual exit
-    # (early-exit-aware, so the per-trade table reflects what really happened).
+    # Per-trade view: compound stock-return between actual entry and actual exit.
     px_vals = prices.to_numpy()
     p_entry = px_vals[entry_idx_arr, tk_col]
     p_exit = px_vals[exit_idx_arr, tk_col]
@@ -235,6 +278,65 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
     s = s.drop(columns=["_factor"]).dropna(subset=["stock_ret"])
 
     return s, short_book_daily, balanced_daily
+
+
+def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
+                      k: int, entry_delay: int, hold_days: int,
+                      balanced_weight: float = 0.5):
+    """Bottom-K backtest. Per signal_date, rank tickers by ``factor_for_bottom_k(condition)``
+    and short the K names with the LOWEST factor. Each becomes an independent trade with
+    entry at close of (signal_date + entry_delay trading days), held for ``hold_days``.
+
+    No thresholds, no early exit — pure mechanical bottom-K selection per AE date.
+    Daily P&L and balanced book share the same conventions as ``simulate``.
+    """
+    if entry_delay < 1:
+        raise ValueError("entry_delay must be >= 1")
+    if hold_days < 1:
+        raise ValueError("hold_days must be >= 1")
+    if k < 1:
+        raise ValueError("k must be >= 1")
+    if not (0.0 <= balanced_weight <= 1.0):
+        raise ValueError("balanced_weight must be in [0, 1]")
+
+    def _empty(s_template):
+        cols = list(s_template.columns) + ["trade_date", "exit_date", "stock_ret", "short_ret"]
+        return pd.DataFrame(columns=cols), pd.Series(dtype=float), pd.Series(dtype=float)
+
+    factor_vals = factor_for_bottom_k(sig, condition).to_numpy()
+    sig_with_factor = sig.assign(_factor=factor_vals)
+    sig_with_factor = sig_with_factor[sig_with_factor["ticker"].isin(prices.columns)]
+    sig_with_factor = sig_with_factor.dropna(subset=["_factor"])
+    if sig_with_factor.empty:
+        return _empty(sig)
+
+    # If two tickers tie on factor, break by ticker name for determinism.
+    s = (sig_with_factor
+         .sort_values(["signal_date", "_factor", "ticker"])
+         .groupby("signal_date", as_index=False, sort=False)
+         .head(k)
+         .copy())
+    if s.empty:
+        return _empty(sig)
+
+    trading_days = prices.index
+    trading_days_np = trading_days.values.astype("datetime64[ns]")
+    n_days = len(trading_days)
+    sig_dates_np = s["signal_date"].values.astype("datetime64[ns]")
+    entry_idx_arr = np.searchsorted(trading_days_np, sig_dates_np, side="right") + (entry_delay - 1)
+    valid = (entry_idx_arr + 1) < n_days
+    s = s.iloc[valid].copy()
+    entry_idx_arr = entry_idx_arr[valid]
+    if s.empty:
+        return _empty(sig)
+
+    col_idx = {c: i for i, c in enumerate(prices.columns)}
+    tk_col = np.array([col_idx[t] for t in s["ticker"]])
+    exit_idx_arr = np.minimum(entry_idx_arr + hold_days, n_days - 1)
+
+    return _compute_pnl_and_daily_series(
+        s, prices, entry_idx_arr, exit_idx_arr, tk_col, balanced_weight,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -262,13 +364,14 @@ def portfolio_turnover_daily(s_trades: pd.DataFrame,
                              trading_days: pd.DatetimeIndex) -> float:
     """Average daily turnover (%) of the equal-weight short basket.
 
-    Daily turnover on day t is ``½ · Σ_i |w_i(t) − w_i(t−1)|``, where ``w_i = 1/N`` for held
-    names and 0 otherwise. The ½ factor normalizes a complete book swap to 100%.
+    Daily turnover on day t is ``Σ_i |w_i(t) − w_i(t−1)|``, where ``w_i = 1/N`` for held
+    names and 0 otherwise. **100% turnover means the L1 weight change equals 1 on a typical
+    day** (e.g. one full GMV's worth of trades). A complete same-day book swap has
+    ``Σ|Δw| = 2`` → 200% on that day.
 
-    Reference: a 5-name book that swaps 1 name in / 1 name out each day has
-    ``daily turnover = 20%`` — the book turns over once per (5-day) trading week.
-    Steady-state shorthand: ``daily turnover ≈ 1 / hold_days`` for a constant-size basket
-    with no early exits.
+    Steady-state shorthand: a constant-size basket with 1 name entering and 1 leaving per
+    day has daily turnover ``2/N`` (e.g. ``N=5`` → 40%). For a strategy with hold = H,
+    steady state is ``2/H``.
 
     Days where both yesterday's and today's baskets are empty are excluded from the mean.
     Returns 0.0 if the book never holds anything.
@@ -291,22 +394,11 @@ def portfolio_turnover_daily(s_trades: pd.DataFrame,
         l1 = (len(common) * abs(w_prev - w_cur)
               + len(only_prev) * w_prev
               + len(only_cur) * w_cur)
-        daily.append(l1 / 2.0)
+        daily.append(l1)
 
     if not daily:
         return 0.0
     return float(np.mean(daily) * 100.0)
-
-
-def portfolio_turnover_annualized(s_trades: pd.DataFrame, trading_days: pd.DatetimeIndex,
-                                  periods_per_year: int = 252) -> float:
-    """Annualized turnover (%): ``portfolio_turnover_daily × periods_per_year``.
-
-    Steady-state shorthand (constant-size basket, no early exits):
-    ``annualized ≈ 252 / hold_days × 100%``.
-    Returns 0.0 if the book never holds anything.
-    """
-    return portfolio_turnover_daily(s_trades, trading_days) * periods_per_year
 
 
 def basket_size_daily(s_trades: pd.DataFrame, trading_days: pd.DatetimeIndex) -> pd.Series:
@@ -328,10 +420,13 @@ def basket_size_daily(s_trades: pd.DataFrame, trading_days: pd.DatetimeIndex) ->
 
 def sharpe(returns: pd.Series, periods_per_year: int = 252) -> float:
     """Annualized Sharpe assuming each datapoint is one trade-day (independence assumed).
-    Returns NaN if series is empty or std is 0."""
-    if returns.std(ddof=1) == 0 or len(returns) < 2:
+    Returns NaN if series is empty, length-1, or has zero std."""
+    if len(returns) < 2:
         return float("nan")
-    return returns.mean() / returns.std(ddof=1) * np.sqrt(periods_per_year)
+    sd = returns.std(ddof=1)
+    if sd == 0 or pd.isna(sd):
+        return float("nan")
+    return returns.mean() / sd * np.sqrt(periods_per_year)
 
 
 def max_drawdown(cum_pct: pd.Series) -> float:

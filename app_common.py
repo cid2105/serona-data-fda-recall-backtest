@@ -1,0 +1,266 @@
+"""Shared chrome, brand palette, and cached data loaders for the Serona Data
+Recall Dataset Backtest streamlit app.
+
+Each page imports the helpers it needs; ``inject_chrome()`` is called once from
+``streamlit_app.py`` so the hero + global CSS render on every page navigation.
+"""
+
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from strategy import normalize_manu, clean_prices
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "data"
+MAPPING_CSV = ROOT / "ticker_mapping" / "fuzzy_matching" / "combined_mappings.csv"
+
+# ---------------------------------------------------------------------------
+# Brand palette — Serona blue
+# ---------------------------------------------------------------------------
+BRAND_BLUE       = "#1E40AF"   # primary
+BRAND_BLUE_LIGHT = "#3B82F6"   # accent
+BRAND_NAVY       = "#0F172A"   # text / dark
+BRAND_AMBER      = "#D97706"   # warm contrast (losses, benchmark)
+BRAND_SLATE      = "#475569"   # secondary text
+BRAND_MIST       = "#F1F5F9"   # subtle bg
+BRAND_BLUE_TINT  = "#DBEAFE"   # very light blue (pill bg, subtle highlight)
+
+# Used for the alphalens forward-period grouping + quantile lines
+PERIOD_PALETTE   = [BRAND_BLUE, BRAND_BLUE_LIGHT, BRAND_AMBER]
+QUANTILE_PALETTE = ["#7F1D1D", "#DC2626", "#94A3B8", BRAND_BLUE_LIGHT, BRAND_BLUE]
+
+PLOTLY_FONT = dict(
+    family="-apple-system, BlinkMacSystemFont, Inter, sans-serif",
+    color=BRAND_NAVY, size=12,
+)
+
+
+# ---------------------------------------------------------------------------
+# Page chrome — set_page_config + CSS + hero
+# ---------------------------------------------------------------------------
+
+_CSS = f"""
+<style>
+  /* Hide demo-y Streamlit chrome but keep the header visible (sidebar toggle + Deploy live there). */
+  #MainMenu, footer {{visibility: hidden; height: 0;}}
+  header[data-testid="stHeader"] {{background: rgba(255,255,255,0); height: 2.5rem;}}
+
+  /* Tight, focused page padding */
+  .block-container {{padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1400px;}}
+
+  /* Hero band — logo + subtitle on the left, descriptive tag on the right */
+  .serona-hero {{
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 1.4rem;
+      padding: 0.4rem 0 1.0rem 0;
+      border-bottom: 2px solid {BRAND_BLUE};
+      margin-bottom: 1.4rem;
+  }}
+  .serona-brand {{display: flex; align-items: center; gap: 0.9rem;}}
+  .serona-logo {{height: 38px; width: auto; display: block;}}
+  .serona-title {{
+      font-size: 1.15rem; font-weight: 600; letter-spacing: -0.01em;
+      color: {BRAND_NAVY}; line-height: 1.1;
+  }}
+  .serona-title .accent {{color: {BRAND_BLUE};}}
+  .serona-tag {{
+      color: {BRAND_SLATE}; font-size: 0.9rem; font-weight: 500; text-align: right;
+  }}
+
+  /* Section header above metrics — period range + strategy pill */
+  .section-meta {{
+      color: {BRAND_SLATE}; font-size: 0.78rem; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      margin: 0.6rem 0 0.9rem 0;
+  }}
+  .section-meta .pill {{
+      display: inline-block; background: {BRAND_BLUE_TINT}; color: {BRAND_BLUE};
+      padding: 2px 10px; border-radius: 999px; margin-left: 0.6rem;
+      letter-spacing: 0.04em; font-size: 0.72rem;
+  }}
+
+  /* Metric card polish */
+  [data-testid="stMetric"] {{
+      background: #FFFFFF;
+      border: 1px solid #E2E8F0;
+      border-radius: 12px;
+      padding: 1.0rem 1.2rem 0.85rem 1.2rem;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      transition: box-shadow 120ms ease, border-color 120ms ease;
+  }}
+  [data-testid="stMetric"]:hover {{
+      box-shadow: 0 4px 12px rgba(30, 64, 175, 0.10);
+      border-color: {BRAND_BLUE_LIGHT};
+  }}
+  [data-testid="stMetricLabel"] {{
+      color: {BRAND_SLATE}; font-weight: 500; font-size: 0.85rem; text-transform: uppercase;
+      letter-spacing: 0.04em;
+  }}
+  [data-testid="stMetricValue"] {{
+      color: {BRAND_NAVY}; font-weight: 700; font-size: 1.85rem; letter-spacing: -0.01em;
+  }}
+
+  /* Sidebar polish — subtle blue tint to nod at the brand */
+  [data-testid="stSidebar"] {{
+      background: #F4F8FF; border-right: 1px solid #DAE6F5;
+  }}
+  [data-testid="stSidebar"] h2,
+  [data-testid="stSidebar"] h3 {{
+      color: {BRAND_NAVY}; font-size: 1.05rem; font-weight: 700;
+      margin-top: 0.3rem; padding-bottom: 0.25rem;
+      border-bottom: 1px solid #DAE6F5;
+  }}
+  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{
+      color: {BRAND_SLATE}; font-weight: 500;
+  }}
+
+  /* Section subheaders */
+  h2, h3 {{color: {BRAND_NAVY}; letter-spacing: -0.015em;}}
+  h3 {{font-size: 1.15rem; font-weight: 600;}}
+
+  /* Page-nav (sidebar) heading from st.navigation — inherit our blue */
+  [data-testid="stSidebarNav"] a[aria-current="page"] {{
+      color: {BRAND_BLUE} !important;
+  }}
+</style>
+"""
+
+_HERO_HTML = """
+<div class="serona-hero">
+  <div class="serona-brand">
+    <img class="serona-logo"
+         src="https://seronadata.com/assets/serona-logo-full-BhluY9ja.png"
+         alt="Serona Data" />
+    <div class="serona-title">Recall Dataset Backtest</div>
+  </div>
+  <div class="serona-tag">FDA medical-device adverse-event predictions</div>
+</div>
+"""
+
+
+def inject_chrome():
+    """Set page config + global CSS + render the hero. Call once at the top of the entry script."""
+    st.set_page_config(
+        page_title="Serona Data — Recall Dataset Backtest",
+        layout="wide", initial_sidebar_state="expanded",
+    )
+    st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(_HERO_HTML, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Cached data loaders (shared across pages)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner="Loading + joining predictions and tickers...")
+def load_signals():
+    cc = pd.read_csv(DATA_DIR / "CoreCoverage.tsv", sep="\t")
+    pred = pd.read_parquet(DATA_DIR / "260420_preds_and_recalls_stored.parquet")
+    mp = pd.read_csv(MAPPING_CSV)
+
+    core = set(cc["Ticker"].str.upper())
+    mp = mp[mp["ticker"].isin(core)][["normalized_manufacturer", "ticker"]].drop_duplicates()
+
+    pred = pred.assign(_norm=pred["device_manufacturer_d_name"].map(normalize_manu))
+    j = pred.merge(mp, left_on="_norm", right_on="normalized_manufacturer", how="inner")
+    j["signal_date"] = pd.to_datetime(j["unified_ae_date"]).dt.normalize()
+
+    sig = (j.groupby(["ticker", "signal_date"])[
+              ["prob_class_0", "prob_class_1", "prob_class_2"]]
+              .mean().reset_index())
+    return sig
+
+
+@st.cache_data(show_spinner="Loading prices...")
+def _load_prices_raw():
+    px = pd.read_parquet(DATA_DIR / "yf_adj_close_2025.parquet")
+    if "date" in px.columns:
+        px = px.set_index("date")
+    px.index = pd.DatetimeIndex(px.index).tz_localize(None).normalize()
+    px.index.name = "date"
+    return px.sort_index()
+
+
+@st.cache_data(show_spinner=False)
+def load_prices():
+    """Returns cleaned prices (forward-fills short NaN runs, drops all-NaN tickers)."""
+    return clean_prices(_load_prices_raw())
+
+
+def show_data_health():
+    """Surface SPY data-quality issues at the top of strategy pages."""
+    prices = load_prices()
+    if "SPY" in prices.columns:
+        spy_nan_dates = prices.index[prices["SPY"].isna()]
+        if len(spy_nan_dates):
+            st.caption(
+                f":warning: SPY benchmark has {len(spy_nan_dates)} missing day(s) — "
+                f"treating those as 0% return. Affected: "
+                f"{', '.join(d.strftime('%Y-%m-%d') for d in spy_nan_dates[:5])}"
+                f"{' …' if len(spy_nan_dates) > 5 else ''}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Plotly layout helpers — keep the look consistent across pages
+# ---------------------------------------------------------------------------
+
+def base_layout(title: str, *, height: int = 380, top_margin: int = 90):
+    """Return common Plotly ``update_layout`` kwargs with brand styling.
+
+    ``title.pad.b`` reserves whitespace between the title and the plot area so charts
+    don't feel crowded under the heading. ``top_margin`` should be ≥ ~80 so the title
+    + breathing room fit; bump to ~110 when the chart also has subplot titles.
+    """
+    return dict(
+        height=height, template="plotly_white",
+        title=dict(text=title, x=0, xanchor="left",
+                   font=dict(color=BRAND_NAVY, size=14),
+                   pad=dict(b=18)),
+        font=PLOTLY_FONT,
+        margin=dict(t=top_margin, b=40, l=60, r=20),
+        plot_bgcolor="white", paper_bgcolor="white",
+    )
+
+
+def style_axes(fig, *, percent_axis: bool = True):
+    """Apply consistent axis styling to a Plotly figure."""
+    fig.update_xaxes(showgrid=False, showline=True, linecolor="#E2E8F0",
+                     tickfont=dict(color=BRAND_SLATE))
+    yaxis_kwargs = dict(gridcolor="#EEF2F7", zeroline=False,
+                        tickfont=dict(color=BRAND_SLATE))
+    if percent_axis:
+        yaxis_kwargs["tickformat"] = ".0f"
+    fig.update_yaxes(**yaxis_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Active-window helper — shared by both backtest pages
+# ---------------------------------------------------------------------------
+
+def trim_to_active_window(daily_short, daily_bal, basket_full):
+    """Trim daily series to the first→last day the basket actually held names. Avoids
+    leading/trailing zero days biasing Sharpe / vol toward 0 and stretching charts.
+
+    Returns (daily_short_trimmed, daily_bal_trimmed, basket_size_trimmed).
+    """
+    active_dates = basket_full[basket_full > 0].index
+    if not len(active_dates):
+        return daily_short, daily_bal, basket_full
+    first_active, last_active = active_dates[0], active_dates[-1]
+    return (
+        daily_short.loc[first_active:last_active],
+        daily_bal.loc[first_active:last_active],
+        basket_full.loc[first_active:last_active],
+    )
+
+
+__all__ = [
+    "BRAND_BLUE", "BRAND_BLUE_LIGHT", "BRAND_NAVY", "BRAND_AMBER",
+    "BRAND_SLATE", "BRAND_MIST", "BRAND_BLUE_TINT",
+    "PERIOD_PALETTE", "QUANTILE_PALETTE", "PLOTLY_FONT",
+    "inject_chrome", "load_signals", "load_prices", "show_data_health",
+    "base_layout", "style_axes", "trim_to_active_window",
+]

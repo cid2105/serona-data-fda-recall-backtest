@@ -15,10 +15,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from strategy import (  # noqa: E402
-    STRATEGIES, factor_for_condition, normalize_manu,
-    simulate, sharpe, max_drawdown, basket_size_daily,
-    portfolio_turnover_annualized, portfolio_turnover_daily,
-    validate_prices, clean_prices,
+    STRATEGIES, factor_for_condition, factor_for_bottom_k, normalize_manu,
+    simulate, simulate_bottom_k, sharpe, max_drawdown, basket_size_daily,
+    portfolio_turnover_daily, validate_prices, clean_prices,
 )
 
 
@@ -106,6 +105,43 @@ def test_factor_for_condition_or_uses_max(small_sig):
 def test_factor_for_condition_unknown_raises(small_sig):
     with pytest.raises(ValueError):
         factor_for_condition(small_sig, "bogus")
+
+
+# -----------------------------------------------------------------------------
+# factor_for_bottom_k — multi-class rules use min instead of max
+# -----------------------------------------------------------------------------
+
+def test_factor_for_bottom_k_single_class_columns(small_sig):
+    """Single-class rules return the corresponding probability column."""
+    pd.testing.assert_series_equal(
+        factor_for_bottom_k(small_sig, "p0"), small_sig["prob_class_0"], check_names=False,
+    )
+    pd.testing.assert_series_equal(
+        factor_for_bottom_k(small_sig, "p1"), small_sig["prob_class_1"], check_names=False,
+    )
+    pd.testing.assert_series_equal(
+        factor_for_bottom_k(small_sig, "p2"), small_sig["prob_class_2"], check_names=False,
+    )
+
+
+def test_factor_for_bottom_k_min_rules(small_sig):
+    """Multi-class rules take the min across the listed columns. Bottom-K shorts the LOWEST factor."""
+    p0 = small_sig["prob_class_0"]
+    p1 = small_sig["prob_class_1"]
+    p2 = small_sig["prob_class_2"]
+    pd.testing.assert_series_equal(
+        factor_for_bottom_k(small_sig, "min(p0, p1)"),
+        pd.concat([p0, p1], axis=1).min(axis=1),
+    )
+    pd.testing.assert_series_equal(
+        factor_for_bottom_k(small_sig, "min(p0, p1, p2)"),
+        pd.concat([p0, p1, p2], axis=1).min(axis=1),
+    )
+
+
+def test_factor_for_bottom_k_unknown_raises(small_sig):
+    with pytest.raises(ValueError):
+        factor_for_bottom_k(small_sig, "bogus")
 
 
 # -----------------------------------------------------------------------------
@@ -422,6 +458,116 @@ def test_simulate_invalid_args_raise(synthetic_prices):
 
 
 # -----------------------------------------------------------------------------
+# simulate_bottom_k — short the K names with the lowest factor each signal_date
+# -----------------------------------------------------------------------------
+
+def test_bottom_k_picks_lowest_factor_per_signal_date(synthetic_prices):
+    """Three tickers signal on the same day with distinct p0 values. With K=2 and rule
+    `p0`, bottom-K should pick the two LOWEST p0 — A (0.10) and B (0.20), NOT C (0.90)."""
+    px = synthetic_prices.copy()
+    px["C"] = 80 * (1.005 ** np.arange(len(px)))   # gently drifting third name
+    sigs = pd.DataFrame([
+        _signal("A", "2025-01-02", p0=0.10, p1=0.45, p2=0.45),
+        _signal("B", "2025-01-02", p0=0.20, p1=0.40, p2=0.40),
+        _signal("C", "2025-01-02", p0=0.90, p1=0.05, p2=0.05),
+    ])
+    s, _, _ = simulate_bottom_k(sigs, px, "p0", k=2, entry_delay=1, hold_days=1)
+    chosen = set(s["ticker"])
+    assert chosen == {"A", "B"}
+
+
+def test_bottom_k_holds_full_window_no_early_exit(synthetic_prices):
+    """Bottom-K has no early-exit logic. A position entered on day 0 with hold=5 must
+    contribute P&L on EXACTLY days 2..6 (entry day 1 → P&L on days 2..6)."""
+    sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.05)])
+    _, short_book, _ = simulate_bottom_k(sigs, synthetic_prices, "p0",
+                                         k=1, entry_delay=1, hold_days=5)
+    nz = short_book[short_book != 0]
+    assert list(nz.index) == [synthetic_prices.index[i] for i in (2, 3, 4, 5, 6)]
+
+
+def test_bottom_k_uses_min_for_multi_class_rule(synthetic_prices):
+    """Under `min(p0, p1)` the factor is the per-row min. Three tickers with distinct mins:
+    A min=0.10, B min=0.30, C min=0.05. With K=2 we expect the TWO lowest mins → C (0.05) and A (0.10)."""
+    px = synthetic_prices.copy()
+    px["C"] = 80 * (1.005 ** np.arange(len(px)))
+    sigs = pd.DataFrame([
+        _signal("A", "2025-01-02", p0=0.10, p1=0.95, p2=0.0),  # min = 0.10
+        _signal("B", "2025-01-02", p0=0.40, p1=0.30, p2=0.0),  # min = 0.30
+        _signal("C", "2025-01-02", p0=0.05, p1=0.95, p2=0.0),  # min = 0.05
+    ])
+    s, _, _ = simulate_bottom_k(sigs, px, "min(p0, p1)",
+                                k=2, entry_delay=1, hold_days=1)
+    assert set(s["ticker"]) == {"C", "A"}
+
+
+def test_bottom_k_per_date_independent(synthetic_prices):
+    """K is applied PER signal_date. Two days, three tickers each, K=1 → 2 trades total
+    (one per day, the lowest-factor name on each day)."""
+    px = synthetic_prices.copy()
+    px["C"] = 80 * (1.005 ** np.arange(len(px)))
+    sigs = pd.DataFrame([
+        _signal("A", "2025-01-02", p0=0.10),
+        _signal("B", "2025-01-02", p0=0.30),
+        _signal("C", "2025-01-02", p0=0.50),
+        _signal("A", "2025-01-03", p0=0.40),
+        _signal("B", "2025-01-03", p0=0.05),
+        _signal("C", "2025-01-03", p0=0.50),
+    ])
+    s, _, _ = simulate_bottom_k(sigs, px, "p0", k=1, entry_delay=1, hold_days=1)
+    assert len(s) == 2
+    chosen_by_date = dict(zip(s["signal_date"], s["ticker"]))
+    assert chosen_by_date[pd.Timestamp("2025-01-02")] == "A"
+    assert chosen_by_date[pd.Timestamp("2025-01-03")] == "B"
+
+
+def test_bottom_k_balanced_book_is_50_50_spy_plus_short(synthetic_prices):
+    """Balanced book formula must hold for bottom-K too: 0.5 * short + 0.5 * SPY."""
+    sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.05)])
+    _, short_book, balanced = simulate_bottom_k(sigs, synthetic_prices, "p0",
+                                                k=1, entry_delay=1, hold_days=1)
+    spy_ret = synthetic_prices["SPY"].pct_change(fill_method=None).fillna(0)
+    expected = 0.5 * short_book + 0.5 * spy_ret
+    pd.testing.assert_series_equal(balanced, expected, check_names=False, atol=1e-12)
+
+
+def test_bottom_k_raises_on_invalid_args(synthetic_prices):
+    sigs = pd.DataFrame([_signal("A", "2025-01-02")])
+    with pytest.raises(ValueError, match="entry_delay"):
+        simulate_bottom_k(sigs, synthetic_prices, "p0", k=1, entry_delay=0, hold_days=1)
+    with pytest.raises(ValueError, match="hold_days"):
+        simulate_bottom_k(sigs, synthetic_prices, "p0", k=1, entry_delay=1, hold_days=0)
+    with pytest.raises(ValueError, match="k"):
+        simulate_bottom_k(sigs, synthetic_prices, "p0", k=0, entry_delay=1, hold_days=1)
+    with pytest.raises(ValueError, match="balanced_weight"):
+        simulate_bottom_k(sigs, synthetic_prices, "p0", k=1, entry_delay=1, hold_days=1,
+                          balanced_weight=1.5)
+
+
+def test_bottom_k_empty_when_no_signals(synthetic_prices):
+    """Sig table missing required tickers → empty result."""
+    sigs = pd.DataFrame(columns=["ticker", "signal_date",
+                                 "prob_class_0", "prob_class_1", "prob_class_2"])
+    s, daily, daily_bal = simulate_bottom_k(sigs, synthetic_prices, "p0",
+                                            k=1, entry_delay=1, hold_days=1)
+    assert s.empty and daily.empty and daily_bal.empty
+
+
+def test_bottom_k_skips_tickers_not_in_prices(synthetic_prices):
+    """A ticker not in the price table cannot be traded; bottom-K must ignore it even if
+    it would otherwise rank into the K cheapest."""
+    sigs = pd.DataFrame([
+        _signal("MISSING", "2025-01-02", p0=0.01),  # would rank lowest, but no prices
+        _signal("A",       "2025-01-02", p0=0.10),
+        _signal("B",       "2025-01-02", p0=0.20),
+    ])
+    s, _, _ = simulate_bottom_k(sigs, synthetic_prices, "p0",
+                                k=1, entry_delay=1, hold_days=1)
+    assert len(s) == 1
+    assert s["ticker"].iloc[0] == "A"
+
+
+# -----------------------------------------------------------------------------
 # validate_prices / clean_prices
 # -----------------------------------------------------------------------------
 
@@ -529,51 +675,49 @@ def test_basket_size_daily_empty_returns_zeros(synthetic_prices):
 
 
 # -----------------------------------------------------------------------------
-# portfolio_turnover_daily / portfolio_turnover_annualized
+# portfolio_turnover_daily
+#
+# Convention: daily turnover = Σ_i |w_i(t) − w_i(t−1)|. 100% means the L1 weight
+# change equals 1 on a typical day (one full GMV's worth of trading). A complete
+# same-day book swap has Σ|Δw| = 2 → 200%.
 # -----------------------------------------------------------------------------
 
 def test_turnover_zero_when_no_trades(synthetic_prices):
     empty = pd.DataFrame(columns=["ticker", "trade_date", "exit_date"])
     assert portfolio_turnover_daily(empty, synthetic_prices.index) == 0.0
-    assert portfolio_turnover_annualized(empty, synthetic_prices.index) == 0.0
 
 
 def test_turnover_buy_and_hold_only_initial_allocation():
     """One name held throughout the window: only the ∅→{A} transition contributes.
-    On that single day, ½·Σ|Δw| = ½·1.0 = 0.5. Every other day contributes 0.
-    Mean over (N−1) active-pair days = 0.5/(N−1)."""
+    On that single day Σ|Δw| = 1.0 (the new weight). Every other day contributes 0.
+    Mean over (N−1) active-pair days = 1.0/(N−1)."""
     dates = pd.bdate_range("2025-01-02", periods=20)
     s = pd.DataFrame([{"ticker": "A",
                        "trade_date": dates[0],
                        "exit_date": dates[-1]}])
     daily = portfolio_turnover_daily(s, dates)
-    expected_pct = 0.5 / (len(dates) - 1) * 100
+    expected_pct = 1.0 / (len(dates) - 1) * 100
     assert daily == pytest.approx(expected_pct, rel=1e-9)
 
 
 def test_turnover_once_per_week_rotation():
-    """User's reference: a 5-name book that swaps 1-in / 1-out per day has steady-state
-    daily turnover = 20% (book turns over once per 5-day trading week).
-
-    Construction: trade i opens on day i, exits on day i+5. After the warm-up window
-    fills the basket to 5 names, basket size stays constant at 5 with exactly one
-    entry and one exit per day."""
+    """A 5-name book that swaps 1-in / 1-out per day has steady-state Σ|Δw| = 2/5 = 0.4
+    (40%). Construction: trade i opens day i, exits day i+5. After warm-up the basket
+    holds 5 names with one entry and one exit per day."""
     dates = pd.bdate_range("2025-01-02", periods=400)
     rows = [{"ticker": f"T{i:04d}",
              "trade_date": dates[i],
              "exit_date": dates[i + 5]} for i in range(390)]
     s = pd.DataFrame(rows)
     daily = portfolio_turnover_daily(s, dates)
-    # Steady state is exactly 20%; with ~10 days of ramp + cooldown out of 400, the
-    # mean is dominated by steady state. Tolerate ramp effects with a tight band.
-    assert 19.5 < daily < 20.5
-    # Annualized = daily × 252
-    assert portfolio_turnover_annualized(s, dates) == pytest.approx(daily * 252, rel=1e-12)
+    # Steady state = 40%; ramp + cooldown of ~10 days out of 400 negligible.
+    assert 39.0 < daily < 41.0
 
 
-def test_turnover_steady_state_inverse_of_hold_days():
-    """For a constant-size basket with 1-in/1-out per day and hold=H, daily turnover
-    converges to 1/H. Verify across H ∈ {5, 10, 20, 40}, allowing a small ramp tolerance."""
+def test_turnover_steady_state_2_over_hold_days():
+    """For a constant-size basket with 1-in/1-out per day and hold=H, steady-state daily
+    turnover is 2/H (one entry of weight 1/H + one exit of weight 1/H = Σ|Δw| = 2/H).
+    Verify across H ∈ {5, 10, 20, 40}, allowing a small ramp tolerance."""
     for hold in [5, 10, 20, 40]:
         n_days = 600
         n_trades = n_days - hold
@@ -583,42 +727,27 @@ def test_turnover_steady_state_inverse_of_hold_days():
                  "exit_date": dates[i + hold]} for i in range(n_trades)]
         s = pd.DataFrame(rows)
         daily = portfolio_turnover_daily(s, dates) / 100  # back to fraction
-        target = 1.0 / hold
-        # Ramp/cooldown spans 2·hold days; for n_days=600 they're a small fraction
-        assert abs(daily - target) < 0.02, f"hold={hold}: got {daily:.4f}, expected ~{target:.4f}"
-
-
-def test_turnover_annualized_equals_daily_times_periods():
-    """Annualized must always equal daily × periods_per_year exactly."""
-    dates = pd.bdate_range("2025-01-02", periods=60)
-    rows = [{"ticker": f"T{i:03d}",
-             "trade_date": dates[i],
-             "exit_date": dates[i + 5]} for i in range(50)]
-    s = pd.DataFrame(rows)
-    daily = portfolio_turnover_daily(s, dates)
-    for ppy in (252, 365, 100):
-        assert portfolio_turnover_annualized(s, dates, periods_per_year=ppy) == pytest.approx(
-            daily * ppy, rel=1e-12,
-        )
+        target = 2.0 / hold
+        assert abs(daily - target) < 0.04, f"hold={hold}: got {daily:.4f}, expected ~{target:.4f}"
 
 
 def test_turnover_static_two_name_book():
     """Two names entered together on day 0, held throughout. Only one transition has
-    nonzero L1: ∅ → {A,B}. With N held = 2, w_cur = 0.5 each, sum |Δw| = 1.0, /2 = 0.5.
-    All subsequent days have L1 = 0."""
+    nonzero L1: ∅ → {A,B}, with each new weight = 0.5, so Σ|Δw| = 1.0. All subsequent
+    days have Σ|Δw| = 0. Mean over 9 active-pair days = 1.0/9."""
     dates = pd.bdate_range("2025-01-02", periods=10)
     s = pd.DataFrame([
         {"ticker": "A", "trade_date": dates[0], "exit_date": dates[-1]},
         {"ticker": "B", "trade_date": dates[0], "exit_date": dates[-1]},
     ])
     daily = portfolio_turnover_daily(s, dates)
-    # 9 active-pair days; one contributes 0.5, eight contribute 0. Mean = 0.5/9.
-    assert daily == pytest.approx(0.5 / 9 * 100, rel=1e-9)
+    assert daily == pytest.approx(1.0 / 9 * 100, rel=1e-9)
 
 
 def test_turnover_swap_full_book_in_one_day():
-    """Book {A,B} on day 1, then {C,D} on day 2 (full swap, basket size unchanged).
-    Symmetric difference = 4 names × 0.5 weight each = 2.0; /2 = 1.0 = 100% turnover that day."""
+    """Book {A,B} on day 1, then {C,D} on day 2 — a complete swap of the equal-weight basket.
+    Day 1 (∅→{A,B}): Σ|Δw| = 1.0. Day 2 (full swap): Σ|Δw| = 4·0.5 = 2.0 → 200%.
+    Day 3 ({C,D}→∅): Σ|Δw| = 1.0. Mean of [1.0, 2.0, 1.0] = 4/3 → 133.33%."""
     dates = pd.bdate_range("2025-01-02", periods=4)
     s = pd.DataFrame([
         {"ticker": "A", "trade_date": dates[0], "exit_date": dates[1]},
@@ -626,9 +755,88 @@ def test_turnover_swap_full_book_in_one_day():
         {"ticker": "C", "trade_date": dates[1], "exit_date": dates[2]},
         {"ticker": "D", "trade_date": dates[1], "exit_date": dates[2]},
     ])
-    # Day 1: ∅→{A,B}, L1/2 = 0.5
-    # Day 2: {A,B}→{C,D}, L1 = 4·0.5 = 2, /2 = 1.0
-    # Day 3: {C,D}→∅,    L1 = 1.0,        /2 = 0.5
-    # Mean of [0.5, 1.0, 0.5] = 2/3 → 66.67%
     daily = portfolio_turnover_daily(s, dates)
-    assert daily == pytest.approx(200.0 / 3, rel=1e-9)
+    assert daily == pytest.approx(400.0 / 3, rel=1e-9)
+
+
+# -----------------------------------------------------------------------------
+# Defensive raise paths and edge-case branches
+# -----------------------------------------------------------------------------
+
+def test_validate_prices_raises_on_non_datetime_index():
+    df = pd.DataFrame({"X": [1, 2, 3]}, index=[0, 1, 2])
+    with pytest.raises(ValueError, match="DatetimeIndex"):
+        validate_prices(df)
+
+
+def test_validate_prices_raises_on_unsorted_index():
+    dates = pd.DatetimeIndex(["2025-01-03", "2025-01-02", "2025-01-04"])
+    df = pd.DataFrame({"X": [1, 2, 3]}, index=dates)
+    with pytest.raises(ValueError, match="sorted ascending"):
+        validate_prices(df)
+
+
+def test_simulate_raises_on_invalid_balanced_weight(synthetic_prices):
+    sig = pd.DataFrame([_signal("A", "2025-01-02")])
+    with pytest.raises(ValueError, match="balanced_weight"):
+        simulate(sig, synthetic_prices, "p2 > t", 0.5, 1, 1, balanced_weight=1.5)
+    with pytest.raises(ValueError, match="balanced_weight"):
+        simulate(sig, synthetic_prices, "p2 > t", 0.5, 1, 1, balanced_weight=-0.1)
+
+
+def test_simulate_raises_on_invalid_entry_delay(synthetic_prices):
+    sig = pd.DataFrame([_signal("A", "2025-01-02")])
+    with pytest.raises(ValueError, match="entry_delay"):
+        simulate(sig, synthetic_prices, "p2 > t", 0.5, 0, 1)
+
+
+def test_simulate_raises_on_invalid_hold_days(synthetic_prices):
+    sig = pd.DataFrame([_signal("A", "2025-01-02")])
+    with pytest.raises(ValueError, match="hold_days"):
+        simulate(sig, synthetic_prices, "p2 > t", 0.5, 1, 0)
+
+
+def test_simulate_no_spy_uses_cash_benchmark(synthetic_prices):
+    """When SPY is missing, the long leg yields cash (=0). With balanced_weight=0.5,
+    balanced[d] should equal 0.5 * short_book[d] (not equal to short_book itself, which
+    was the old behavior that silently ignored balanced_weight)."""
+    px = synthetic_prices.drop(columns=["SPY"])
+    sig = pd.DataFrame([_signal("A", "2025-01-02")])
+    _, short_book, balanced = simulate(sig, px, "p2 > t", 0.5, 1, 1, balanced_weight=0.5)
+    np.testing.assert_allclose(balanced.to_numpy(), 0.5 * short_book.to_numpy(), atol=1e-12)
+    # And the short_book itself reflects the held day (-1% on day 2)
+    assert short_book.iloc[2] == pytest.approx(-0.01, abs=1e-9)
+    assert balanced.iloc[2] == pytest.approx(-0.005, abs=1e-9)
+
+
+def test_simulate_signals_all_past_window_returns_empty(synthetic_prices):
+    """If every signal's entry date falls past the end of the trading window, no trade can
+    accumulate P&L. simulate returns an empty trade table and empty daily series."""
+    # Signal on the second-to-last day of the window with entry_delay=10 → entry index >> last day.
+    late_date = synthetic_prices.index[-2].strftime("%Y-%m-%d")
+    sig = pd.DataFrame([_signal("A", late_date)])
+    s, daily_short, daily_bal = simulate(sig, synthetic_prices, "p2 > t", 0.5,
+                                         entry_delay=10, hold_days=1)
+    assert s.empty
+    assert daily_short.empty
+    assert daily_bal.empty
+
+
+def test_portfolio_turnover_daily_empty_directly():
+    """Direct call with an empty trade table — should short-circuit and return 0."""
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    empty = pd.DataFrame(columns=["ticker", "trade_date", "exit_date"])
+    assert portfolio_turnover_daily(empty, dates) == 0.0
+
+
+def test_sharpe_handles_short_or_constant_input():
+    """Edge-case inputs all return NaN cleanly (no warnings, no crashes)."""
+    assert pd.isna(sharpe(pd.Series([], dtype=float)))         # empty
+    assert pd.isna(sharpe(pd.Series([0.01])))                  # length 1
+    assert pd.isna(sharpe(pd.Series([0.0, 0.0, 0.0])))         # zero std
+
+
+def test_max_drawdown_short_input():
+    """Empty / single-point series have undefined drawdown; we return 0.0 by convention."""
+    assert max_drawdown(pd.Series([], dtype=float)) == 0.0
+    assert max_drawdown(pd.Series([5.0])) == 0.0

@@ -123,7 +123,7 @@ st.markdown(
     f"""
     <div class="section-meta">
       Bottom-K strategy · K = {int(k)} · {period_str}
-      <span class="pill">balanced book · 50% short / 50% SPY</span>
+      <span class="pill">Market Neutral Book · 50% short / 50% SPY</span>
     </div>
     """,
     unsafe_allow_html=True,

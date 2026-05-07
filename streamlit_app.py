@@ -141,7 +141,7 @@ st.markdown(
     """
     <div class="serona-hero">
       <div class="serona-wordmark">Serona Data<span class="accent"> - </span>Recall Dataset Backtest</div>
-      <div class="serona-tag">Short-side strategy on FDA medical-device adverse-event predictions</div>
+      <div class="serona-tag">FDA medical-device adverse-event predictions</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -178,7 +178,7 @@ with st.expander("Strategy rules", expanded=False):
 - Max drawdown computed on the cumulative-percent curve.
 
 **Data**: yfinance adjusted close (`auto_adjust=True`); SWAV dropped (delisted);
-HOLX 5% NaN forward-filled up to 2 days. No spike-revert or stale-price anomalies detected.
+HOLX 5% NaN forward-filled up to 2 days. No stale-price anomalies detected.
         """
     )
 
@@ -187,23 +187,23 @@ prices_raw = load_prices()
 prices = clean_prices(prices_raw)
 price_issues = validate_prices(prices)
 n_dropped = prices_raw.shape[1] - prices.shape[1]
-if n_dropped or price_issues["spike_revert_count"] or price_issues["non_positive_obs"]:
+if n_dropped or price_issues["non_positive_obs"]:
     print(
         f"Price audit: dropped {n_dropped} all-NaN ticker(s) "
         f"({', '.join(price_issues['all_nan_tickers']) or '—'}), "
-        f"spike-revert anomalies: {price_issues['spike_revert_count']}, "
         f"non-positive obs: {price_issues['non_positive_obs']}."
     )
 
 with st.sidebar:
-    st.header("Knobs")
+    st.header("Strategy Knobs")
+    st.html("<br/>")
     strategy_keys = list(STRATEGIES.keys())
-    cond = st.selectbox("Condition (short fires when condition is TRUE)", strategy_keys,
-                        index=strategy_keys.index("any prob > t"))
+    cond = st.selectbox("Short Trigger Rule (short fires on condition)", strategy_keys,
+                        index=strategy_keys.index("p0 > t OR p1 > t"))
     threshold = st.slider("Entry threshold", 0.0, 1.0, 0.60, 0.01,
                           help="Position opens when the condition's factor > this value.")
     exit_threshold = st.slider(
-        "Exit threshold (early exit if factor < this value)", 0.0, 1.0, 0.40, 0.01,
+        "Exit threshold (early exit if p < threshold)", 0.0, 1.0, 0.40, 0.01,
         help="If a later ticker-day shows factor < this value, close the position early at the "
              "exit signal's trade date. 0 disables early exit. Must be strictly < entry threshold.",
     )

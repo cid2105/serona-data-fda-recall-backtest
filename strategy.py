@@ -83,21 +83,7 @@ def validate_prices(prices: pd.DataFrame, *, spike_thresh: float = 0.25,
     issues["all_nan_tickers"] = nan_pct[nan_pct == 1.0].index.tolist()
     issues["partial_nan_tickers"] = nan_pct[(nan_pct > 0) & (nan_pct < 1)].to_dict()
     issues["non_positive_obs"] = int(((prices <= 0) & prices.notna()).sum().sum())
-
-    # Spike-revert: a single-day move > spike_thresh whose 2-day round-trip is < revert_thresh.
-    # Uses the geometric round-trip ratio shift(-1)/shift(1) so the test catches genuine bad ticks
-    # (price spikes back to its prior level a day later) regardless of arithmetic-return asymmetry.
-    r = prices.pct_change(fill_method=None)
-    big_move = r.abs() > spike_thresh
-    round_trip = (prices.shift(-1) / prices.shift(1) - 1).abs()
-    revert = round_trip < revert_thresh
-    suspect = big_move & revert
-    issues["spike_revert_count"] = int(suspect.sum().sum())
-    if issues["spike_revert_count"]:
-        issues["spike_revert_locations"] = [
-            (d.date().isoformat(), t) for d, t in suspect.stack()[lambda s: s].index
-        ]
-
+    
     diff_zero = prices.diff() == 0
     stale = diff_zero.rolling(stale_run).sum() == stale_run
     issues["stale_run_count"] = int(stale.sum().sum())

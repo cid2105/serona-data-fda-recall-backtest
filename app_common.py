@@ -112,17 +112,50 @@ _CSS = f"""
       margin-top: 0.3rem; padding-bottom: 0.25rem;
       border-bottom: 1px solid #DAE6F5;
   }}
-  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {{
-      color: {BRAND_SLATE}; font-weight: 500;
+  /* Widget labels (selectbox, slider, number_input titles) — navy for legibility
+     against the tinted-blue sidebar background. */
+  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label,
+  [data-testid="stSidebar"] label p {{
+      color: {BRAND_NAVY} !important; font-weight: 500;
   }}
 
   /* Section subheaders */
   h2, h3 {{color: {BRAND_NAVY}; letter-spacing: -0.015em;}}
   h3 {{font-size: 1.15rem; font-weight: 600;}}
 
-  /* Page-nav (sidebar) heading from st.navigation — inherit our blue */
-  [data-testid="stSidebarNav"] a[aria-current="page"] {{
+  /* Page-nav (sidebar) — non-active links navy, active link brand blue.
+     Span selectors override any inline color Streamlit injects on the link text. */
+  [data-testid="stSidebarNav"] a,
+  [data-testid="stSidebarNav"] a span {{
+      color: {BRAND_NAVY} !important; font-weight: 500;
+  }}
+  [data-testid="stSidebarNav"] a:hover,
+  [data-testid="stSidebarNav"] a:hover span {{
       color: {BRAND_BLUE} !important;
+  }}
+  [data-testid="stSidebarNav"] a[aria-current="page"],
+  [data-testid="stSidebarNav"] a[aria-current="page"] span {{
+      color: {BRAND_BLUE} !important; font-weight: 600;
+  }}
+
+  /* Chart title — HTML header used in place of inline Plotly title.
+     Brand-blue left bar accent + bold navy primary + lighter slate params. */
+  .chart-title {{
+      display: flex; align-items: baseline; flex-wrap: wrap;
+      gap: 0.6rem 0.8rem;
+      margin: 1.2rem 0 0.5rem 0;
+      padding-left: 0.7rem;
+      border-left: 3px solid {BRAND_BLUE};
+      line-height: 1.25;
+  }}
+  .chart-title-name {{
+      color: {BRAND_NAVY}; font-size: 1.05rem; font-weight: 700;
+      letter-spacing: -0.01em;
+  }}
+  .chart-title-meta {{
+      color: {BRAND_SLATE}; font-size: 0.88rem; font-weight: 500;
+      letter-spacing: 0;
   }}
 </style>
 """
@@ -207,21 +240,38 @@ def show_data_health():
 # Plotly layout helpers — keep the look consistent across pages
 # ---------------------------------------------------------------------------
 
-def base_layout(title: str, *, height: int = 380, top_margin: int = 90):
+def base_layout(*, height: int = 380, top_margin: int = 50):
     """Return common Plotly ``update_layout`` kwargs with brand styling.
 
-    ``title.pad.b`` reserves whitespace between the title and the plot area so charts
-    don't feel crowded under the heading. ``top_margin`` should be ≥ ~80 so the title
-    + breathing room fit; bump to ~110 when the chart also has subplot titles.
+    Chart titles are rendered as HTML headers via :func:`chart_title` instead of
+    Plotly's built-in title — keeps the chart config purely about data, frees up
+    the top margin, and gives us full CSS control over the heading look.
     """
     return dict(
         height=height, template="plotly_white",
-        title=dict(text=title, x=0, xanchor="left",
-                   font=dict(color=BRAND_NAVY, size=14),
-                   pad=dict(b=18)),
         font=PLOTLY_FONT,
         margin=dict(t=top_margin, b=40, l=60, r=20),
-        plot_bgcolor="white", paper_bgcolor="white",
+        # Subtle off-white plot area so the (white-bg, blue-bordered) legend stands out
+        # against it. paper_bgcolor stays pure white so titles + margins feel clean.
+        plot_bgcolor="#F8FAFC", paper_bgcolor="white",
+    )
+
+
+def chart_title(name: str, subtitle: str | None = None) -> None:
+    """Render a brand-styled HTML header above a chart. Use this in place of the
+    Plotly inline title for a cleaner, more striking look.
+
+    Args:
+        name: Primary title (bold navy).
+        subtitle: Optional metadata string (e.g. parameter values), rendered in
+            lighter slate after the primary title.
+    """
+    parts = [f'<span class="chart-title-name">{name}</span>']
+    if subtitle:
+        parts.append(f'<span class="chart-title-meta">{subtitle}</span>')
+    st.markdown(
+        f'<div class="chart-title">{"".join(parts)}</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -262,5 +312,5 @@ __all__ = [
     "BRAND_SLATE", "BRAND_MIST", "BRAND_BLUE_TINT",
     "PERIOD_PALETTE", "QUANTILE_PALETTE", "PLOTLY_FONT",
     "inject_chrome", "load_signals", "load_prices", "show_data_health",
-    "base_layout", "style_axes", "trim_to_active_window",
+    "base_layout", "chart_title", "style_axes", "trim_to_active_window",
 ]

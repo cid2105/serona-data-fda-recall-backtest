@@ -553,6 +553,74 @@ def test_bottom_k_empty_when_no_signals(synthetic_prices):
     assert s.empty and daily.empty and daily_bal.empty
 
 
+def test_bottom_k_pools_ae_dates_that_share_an_entry_day():
+    """When multiple AE dates roll forward to the same entry trading day (e.g. AE
+    dates over a weekend all rolling to Monday), bottom-K must pick K UNIQUE names
+    from the COMBINED pool — not K per AE date.
+
+    Setup: bdate_range starting Thu Jan 2 makes
+        dates[1] = Fri Jan 3,   dates[2] = Mon Jan 6.
+    With entry_delay=1, all of {Fri, Sat, Sun} → entry_idx = 2 (Mon trade day).
+    Six tickers spread over Fri/Sat/Sun signals; combined ranking by p0 picks the
+    K=2 lowest globally, not 2 per date.
+    """
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    fri = pd.Timestamp("2025-01-03")  # trading day, dates[1]
+    sat = pd.Timestamp("2025-01-04")  # weekend → rolls to Mon
+    sun = pd.Timestamp("2025-01-05")  # weekend → rolls to Mon
+
+    sigs = pd.DataFrame([
+        _signal("A", fri, p0=0.10),
+        _signal("B", fri, p0=0.20),
+        _signal("C", sat, p0=0.05),  # global lowest
+        _signal("D", sat, p0=0.15),
+        _signal("E", sun, p0=0.25),
+        _signal("F", sun, p0=0.35),
+    ])
+    # Combined ranking by p0: C(0.05) < A(0.10) < D(0.15) < B(0.20) < E < F.
+    # With K=2 we expect {C, A}, NOT 2 per AE-date which would give 6 trades.
+
+    prices = pd.DataFrame(
+        {tk: [100.0] * 10 for tk in ["A", "B", "C", "D", "E", "F", "SPY"]},
+        index=dates,
+    )
+    s, _, _ = simulate_bottom_k(
+        sigs, prices, "p0", k=2, entry_delay=1, hold_days=1,
+    )
+    assert len(s) == 2
+    assert set(s["ticker"]) == {"C", "A"}
+
+
+def test_bottom_k_dedupes_ticker_within_entry_day_group():
+    """If the same ticker appears in TWO AE-date signals that both roll to one
+    entry day, it should count once toward K — not twice."""
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    fri = pd.Timestamp("2025-01-03")
+    sat = pd.Timestamp("2025-01-04")  # rolls to Mon = same entry as Fri
+
+    # A appears twice (Fri and Sat) with different p0; B and C appear once each.
+    sigs = pd.DataFrame([
+        _signal("A", fri, p0=0.10),
+        _signal("A", sat, p0=0.05),  # A's lowest factor across the pool
+        _signal("B", fri, p0=0.20),
+        _signal("C", sat, p0=0.30),
+    ])
+    # Combined unique-ticker ranking: A(0.05), B(0.20), C(0.30).
+    # K=2 → {A, B}, with A's representative row carrying p0=0.05 (the lower one).
+
+    prices = pd.DataFrame(
+        {tk: [100.0] * 10 for tk in ["A", "B", "C", "SPY"]},
+        index=dates,
+    )
+    s, _, _ = simulate_bottom_k(
+        sigs, prices, "p0", k=2, entry_delay=1, hold_days=1,
+    )
+    assert len(s) == 2
+    assert set(s["ticker"]) == {"A", "B"}
+    a_row = s[s["ticker"] == "A"].iloc[0]
+    assert a_row["prob_class_0"] == pytest.approx(0.05)
+
+
 def test_bottom_k_skips_tickers_not_in_prices(synthetic_prices):
     """A ticker not in the price table cannot be traded; bottom-K must ignore it even if
     it would otherwise rank into the K cheapest."""

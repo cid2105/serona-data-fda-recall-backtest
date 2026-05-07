@@ -16,9 +16,9 @@ from strategy import (
     basket_size_daily, portfolio_turnover_daily,
 )
 from app_common import (
-    BRAND_BLUE, BRAND_AMBER, BRAND_NAVY, BRAND_SLATE,
+    BRAND_BLUE, BRAND_BLUE_LIGHT, BRAND_AMBER, BRAND_NAVY, BRAND_SLATE,
     load_signals, load_prices, show_data_health,
-    base_layout, style_axes, trim_to_active_window,
+    base_layout, chart_title, style_axes, trim_to_active_window,
 )
 
 
@@ -158,9 +158,13 @@ d4.metric("Avg daily turnover", f"{turnover_daily_pct:.1f}%",
 # ---------------------------------------------------------------------------
 # Cumulative return + drawdown chart
 # ---------------------------------------------------------------------------
+chart_title(
+    "Strategy returns",
+    f"{cond} · threshold {threshold:.2f} · hold {hold_days}td",
+)
 fig = make_subplots(rows=2, cols=1, row_heights=[0.66, 0.34],
                     vertical_spacing=0.22,
-                    subplot_titles=("Cumulative return (%)", "Drawdown (pp)"))
+                    subplot_titles=("Cumulative return (%)", "Drawdown (%)"))
 fig.add_trace(go.Scatter(x=cum_short.index, y=cum_short.values,
                          name="Pure short basket",
                          line=dict(width=2.0, color=BRAND_BLUE),
@@ -195,13 +199,11 @@ fig.update_yaxes(title_text="cum return (%)", row=1, col=1,
 fig.update_yaxes(title_text="drawdown (pp)", row=2, col=1,
                  title_font=dict(color=BRAND_SLATE, size=12))
 fig.update_layout(
-    **base_layout(
-        f"Strategy returns — {cond}, threshold {threshold:.2f}, hold {hold_days}td",
-        height=640, top_margin=150,
-    ),
+    **base_layout(height=620, top_margin=80),
     hovermode="x unified",
-    legend=dict(orientation="h", yanchor="bottom", y=1.04, x=0,
-                bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
+    legend=dict(orientation="h", yanchor="bottom", y=1.10, x=0,
+                bgcolor="white", bordercolor=BRAND_BLUE_LIGHT, borderwidth=1,
+                font=dict(size=12, color=BRAND_NAVY)),
 )
 for ann in fig["layout"]["annotations"]:
     ann["font"] = dict(color=BRAND_NAVY, size=13, family="-apple-system, sans-serif")
@@ -214,6 +216,10 @@ st.plotly_chart(fig, width="stretch")
 # Daily basket returns (in expander)
 # ---------------------------------------------------------------------------
 with st.expander("Daily trade returns"):
+    chart_title(
+        "Daily short-basket returns",
+        f"{cond} · threshold {threshold:.2f}",
+    )
     fig2 = go.Figure()
     fig2.add_trace(go.Bar(x=daily_short.index, y=daily_short.values * 100,
                           name="daily short basket return (%)",
@@ -222,10 +228,7 @@ with st.expander("Daily trade returns"):
     fig2.add_hline(y=0, line=dict(color="#94A3B8", width=0.6, dash="dot"))
     style_axes(fig2)
     fig2.update_layout(
-        **base_layout(
-            f"Daily short-basket returns — {cond}, threshold {threshold:.2f}",
-            height=340, top_margin=80,
-        ),
+        **base_layout(height=320, top_margin=30),
         showlegend=False,
         xaxis_title="trade date",
         yaxis_title="daily short basket return (%)",

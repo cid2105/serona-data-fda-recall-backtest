@@ -283,11 +283,18 @@ def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
 def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
                       k: int, entry_delay: int, hold_days: int,
                       balanced_weight: float = 0.5):
-    """Bottom-K backtest. Per signal_date, rank tickers by ``factor_for_bottom_k(condition)``
-    and short the K names with the LOWEST factor. Each becomes an independent trade with
-    entry at close of (signal_date + entry_delay trading days), held for ``hold_days``.
+    """Bottom-K backtest. Per ENTRY TRADING DAY, rank tickers by
+    ``factor_for_bottom_k(condition)`` and short the K names with the LOWEST factor.
+    Each becomes an independent trade with entry at close of (signal_date +
+    entry_delay trading days), held for ``hold_days``.
 
-    No thresholds, no early exit — pure mechanical bottom-K selection per AE date.
+    Multiple AE dates that map to the SAME entry trading day (e.g. weekend AE dates
+    rolling to Monday) are pooled into a single rank-and-pick — so the basket on
+    each entry day has at most K *unique* names from one cohort, not K-per-AE-date.
+    Within an entry-day group, ticker duplicates are deduped (lowest-factor row
+    kept) before the K cut.
+
+    No thresholds, no early exit — pure mechanical bottom-K selection.
     Daily P&L and balanced book share the same conventions as ``simulate``.
     """
     if entry_delay < 1:
@@ -310,25 +317,36 @@ def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
     if sig_with_factor.empty:
         return _empty(sig)
 
-    # If two tickers tie on factor, break by ticker name for determinism.
+    trading_days = prices.index
+    trading_days_np = trading_days.values.astype("datetime64[ns]")
+    n_days = len(trading_days)
+
+    # Map each signal's AE date to its entry trading-day index, then drop signals
+    # that don't have at least one day of P&L runway before the window ends.
+    sig_dates_np = sig_with_factor["signal_date"].values.astype("datetime64[ns]")
+    full_entry_idx = np.searchsorted(trading_days_np, sig_dates_np, side="right") + (entry_delay - 1)
+    sig_with_factor = sig_with_factor.assign(_entry_idx=full_entry_idx)
+    sig_with_factor = sig_with_factor[sig_with_factor["_entry_idx"] + 1 < n_days]
+    if sig_with_factor.empty:
+        return _empty(sig)
+
+    # Bottom-K is computed PER ENTRY TRADING DAY, not per AE-calendar date. Multiple
+    # AE dates that roll forward to the same entry day (e.g. weekend AE dates rolling
+    # to Monday) get pooled into a single rank-and-pick — so the basket on each entry
+    # day has at most K *unique* names from a single cohort. Tie-break: lower factor
+    # first, then ticker name. Within an entry-day group, dedupe by ticker (keep the
+    # lowest-factor row) before taking head(K).
     s = (sig_with_factor
-         .sort_values(["signal_date", "_factor", "ticker"])
-         .groupby("signal_date", as_index=False, sort=False)
+         .sort_values(["_entry_idx", "_factor", "ticker"])
+         .drop_duplicates(subset=["_entry_idx", "ticker"], keep="first")
+         .groupby("_entry_idx", as_index=False, sort=False)
          .head(k)
          .copy())
     if s.empty:
         return _empty(sig)
 
-    trading_days = prices.index
-    trading_days_np = trading_days.values.astype("datetime64[ns]")
-    n_days = len(trading_days)
-    sig_dates_np = s["signal_date"].values.astype("datetime64[ns]")
-    entry_idx_arr = np.searchsorted(trading_days_np, sig_dates_np, side="right") + (entry_delay - 1)
-    valid = (entry_idx_arr + 1) < n_days
-    s = s.iloc[valid].copy()
-    entry_idx_arr = entry_idx_arr[valid]
-    if s.empty:
-        return _empty(sig)
+    entry_idx_arr = s["_entry_idx"].to_numpy()
+    s = s.drop(columns=["_entry_idx"])
 
     col_idx = {c: i for i, c in enumerate(prices.columns)}
     tk_col = np.array([col_idx[t] for t in s["ticker"]])

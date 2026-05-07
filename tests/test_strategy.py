@@ -840,3 +840,190 @@ def test_max_drawdown_short_input():
     """Empty / single-point series have undefined drawdown; we return 0.0 by convention."""
     assert max_drawdown(pd.Series([], dtype=float)) == 0.0
     assert max_drawdown(pd.Series([5.0])) == 0.0
+
+
+# -----------------------------------------------------------------------------
+# End-to-end synthetic validation
+#
+# These two tests construct a controlled price path AND a fixed signal calendar
+# so every active position, every basket-membership transition, and every daily
+# return value is knowable by hand. We then assert the simulator's output against
+# those values. They are the canonical "the strategy code does what we say it
+# does" tests.
+# -----------------------------------------------------------------------------
+
+def _prices_from_returns(returns_per_ticker: dict, dates: pd.DatetimeIndex,
+                         start: float = 100.0) -> pd.DataFrame:
+    """Build a wide price DataFrame from per-ticker daily-return lists.
+
+    ``returns_per_ticker[t][i]`` is the return ON day i (price[i] / price[i-1] - 1).
+    The first entry is ignored (used as a placeholder for the no-prior-day return).
+    """
+    out = {}
+    for ticker, rets in returns_per_ticker.items():
+        prices = [start]
+        for r in rets[1:]:
+            prices.append(prices[-1] * (1.0 + r))
+        out[ticker] = prices
+    return pd.DataFrame(out, index=dates)
+
+
+def test_threshold_strategy_full_synthetic_validation():
+    """End-to-end synthetic validation of the **Threshold** strategy.
+
+    Spec we're verifying:
+      - When a ticker's factor exceeds entry_threshold, go SHORT at close of
+        signal_date + entry_delay trading days.
+      - The position is held for at most hold_days trading days (natural exit).
+      - Early exit fires if a SUBSEQUENT signal for the same ticker has factor <
+        exit_threshold; the position closes at close of (that signal_date +
+        entry_delay), provided that's BEFORE the natural exit.
+      - A repeat entry signal while the ticker is already in the book starts a
+        FRESH overlapping trade (extending the membership window via OR).
+      - All shorts are equal-weighted: short_book[d] = -mean(daily_ret) over the
+        held tickers on day d.
+      - Balanced book: balanced[d] = 0.5 * short_book[d] + 0.5 * SPY_ret[d].
+    """
+    dates = pd.bdate_range("2025-01-02", periods=12)
+
+    # Engineered daily returns. ON DAY i, return goes from price[i-1] to price[i].
+    a_rets   = [None, 0.0,   0.04,  0.0,   -0.02,  0.0,   0.06,  0.0, 0.0, 0.0, 0.0, 0.0]
+    b_rets   = [None, 0.0,   0.0,   0.02,   0.04, -0.02,  0.0,   0.0, 0.0, 0.0, 0.0, 0.0]
+    spy_rets = [None] + [0.0] * 11
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "SPY": spy_rets}, dates,
+    )
+
+    # Signal calendar — see expected trade table below.
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p2=0.90),  # A entry #1
+        _signal("B", dates[1], p2=0.70),  # B entry
+        _signal("A", dates[2], p2=0.70),  # A entry #2 (extends membership window)
+        _signal("B", dates[4], p2=0.05),  # B early-exit trigger
+        _signal("A", dates[5], p2=0.05),  # A early-exit trigger (closes both A trades)
+    ])
+
+    s, short_book, balanced = simulate(
+        sigs, prices, "p2 > t", threshold=0.5, entry_delay=1, hold_days=4,
+        exit_threshold=0.20,
+    )
+
+    # ---- Per-trade table -----------------------------------------------------
+    # A trade #1 (signal d0): entry_idx = 1, natural exit = 5,
+    #   first exit-trig after d0 is d5 → cand_exit_idx = 6, min(5,6) = 5 → exit=5.
+    # A trade #2 (signal d2): entry_idx = 3, natural exit = 7,
+    #   first exit-trig after d2 is d5 → cand_exit_idx = 6, min(7,6) = 6 → exit=6.
+    # B trade    (signal d1): entry_idx = 2, natural exit = 6,
+    #   first exit-trig after d1 is d4 → cand_exit_idx = 5, min(6,5) = 5 → exit=5.
+    assert len(s) == 3
+    a_trades = (s[s["ticker"] == "A"]
+                .sort_values("trade_date").reset_index(drop=True))
+    b_trades = (s[s["ticker"] == "B"]
+                .sort_values("trade_date").reset_index(drop=True))
+    assert a_trades["trade_date"].tolist() == [dates[1], dates[3]]
+    assert a_trades["exit_date"].tolist()  == [dates[5], dates[6]]
+    assert b_trades["trade_date"].tolist() == [dates[2]]
+    assert b_trades["exit_date"].tolist()  == [dates[5]]
+
+    # ---- Basket composition per day -----------------------------------------
+    # held[ti+1 : ei+1] for each trade:
+    #   A#1: held days 2..5
+    #   A#2: held days 4..6
+    #   B  : held days 3..5
+    # Combined (binary OR):
+    #   d0,d1: ∅;  d2: {A};  d3: {A,B};  d4: {A,B};  d5: {A,B};  d6: {A};  d7+: ∅
+    bsz = basket_size_daily(s, dates)
+    assert list(bsz.values) == [0, 0, 1, 2, 2, 2, 1, 0, 0, 0, 0, 0]
+
+    # ---- Daily short_book returns -------------------------------------------
+    # short_book[d] = -mean(daily_returns of held tickers on day d).
+    expected_short = [
+        0.0,                    # d0  ∅
+        0.0,                    # d1  ∅
+        -0.04,                  # d2  {A}: -A_ret = -0.04
+        -(0.0 + 0.02) / 2,      # d3  {A,B}: -mean(0, 0.02) = -0.01
+        -(-0.02 + 0.04) / 2,    # d4  {A,B}: -mean(-0.02, 0.04) = -0.01
+        -(0.0 + -0.02) / 2,     # d5  {A,B}: -mean(0, -0.02) = +0.01
+        -0.06,                  # d6  {A}: -A_ret = -0.06
+        0.0, 0.0, 0.0, 0.0, 0.0,
+    ]
+    np.testing.assert_allclose(short_book.values, expected_short, atol=1e-12)
+
+    # ---- Balanced book: 0.5 * short + 0.5 * SPY (SPY flat → 0.5 * short) ----
+    expected_bal = [0.5 * v for v in expected_short]
+    np.testing.assert_allclose(balanced.values, expected_bal, atol=1e-12)
+
+
+def test_bottom_k_strategy_full_synthetic_validation():
+    """End-to-end synthetic validation of the **Bottom-K** strategy.
+
+    Spec we're verifying:
+      - On each signal_date, rank tickers by factor_for_bottom_k(condition) and
+        SHORT the K names with the LOWEST factor.
+      - Each pick enters at close of signal_date + entry_delay trading days and
+        is held for exactly hold_days trading days. NO thresholds, NO early exit.
+      - Same ticker can be picked on consecutive signal_dates; each pick spawns
+        an independent overlapping trade (basket aggregates via OR).
+      - All shorts equal-weighted: short_book[d] = -mean(daily_ret) over held set.
+      - Balanced: balanced[d] = 0.5 * short_book[d] + 0.5 * SPY_ret[d].
+    """
+    dates = pd.bdate_range("2025-01-02", periods=10)
+
+    a_rets   = [None, 0.0,  0.06, 0.0,   0.0,  0.0, 0.0, 0.0, 0.0, 0.0]
+    b_rets   = [None, 0.0,  0.04, 0.0,   0.02, 0.0, 0.0, 0.0, 0.0, 0.0]
+    c_rets   = [None, 0.0,  0.0,  0.0,   0.06, 0.0, 0.0, 0.0, 0.0, 0.0]
+    d_rets   = [None] + [0.0] * 9   # D never moves; included so it can be ranked
+    spy_rets = [None] + [0.0] * 9
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "D": d_rets, "SPY": spy_rets},
+        dates,
+    )
+
+    # On d0: rank by p0 → A=0.10, B=0.20, D=0.30, C=0.50.  Bottom-2 = {A, B}.
+    # On d2: rank by p0 → B=0.05, C=0.30, A=0.40, D=0.50.  Bottom-2 = {B, C}.
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p0=0.10),
+        _signal("B", dates[0], p0=0.20),
+        _signal("C", dates[0], p0=0.50),
+        _signal("D", dates[0], p0=0.30),
+        _signal("A", dates[2], p0=0.40),
+        _signal("B", dates[2], p0=0.05),
+        _signal("C", dates[2], p0=0.30),
+        _signal("D", dates[2], p0=0.50),
+    ])
+
+    s, short_book, balanced = simulate_bottom_k(
+        sigs, prices, "p0", k=2, entry_delay=1, hold_days=2,
+    )
+
+    # ---- Per-trade table -----------------------------------------------------
+    # d0 cohort: A & B selected.  entry_idx = 1, exit_idx = 3.
+    # d2 cohort: B & C selected.  entry_idx = 3, exit_idx = 5.
+    assert len(s) == 4
+    d0_cohort = s[s["signal_date"] == dates[0]]
+    d2_cohort = s[s["signal_date"] == dates[2]]
+    assert set(d0_cohort["ticker"]) == {"A", "B"}
+    assert set(d2_cohort["ticker"]) == {"B", "C"}
+    assert all(td == dates[1] for td in d0_cohort["trade_date"])
+    assert all(ed == dates[3] for ed in d0_cohort["exit_date"])
+    assert all(td == dates[3] for td in d2_cohort["trade_date"])
+    assert all(ed == dates[5] for ed in d2_cohort["exit_date"])
+
+    # ---- Basket composition per day -----------------------------------------
+    # d0 cohort: held days 2, 3 for A and B
+    # d2 cohort: held days 4, 5 for B and C
+    #   d0,d1: ∅;  d2: {A,B};  d3: {A,B};  d4: {B,C};  d5: {B,C};  d6+: ∅
+    bsz = basket_size_daily(s, dates)
+    assert list(bsz.values) == [0, 0, 2, 2, 2, 2, 0, 0, 0, 0]
+
+    # ---- Daily short_book returns -------------------------------------------
+    # d2 {A,B}: -mean(A_ret=0.06, B_ret=0.04) = -0.05
+    # d3 {A,B}: -mean(0, 0)                   = 0
+    # d4 {B,C}: -mean(B_ret=0.02, C_ret=0.06) = -0.04
+    # d5 {B,C}: -mean(0, 0)                   = 0
+    expected_short = [0.0, 0.0, -0.05, 0.0, -0.04, 0.0, 0.0, 0.0, 0.0, 0.0]
+    np.testing.assert_allclose(short_book.values, expected_short, atol=1e-12)
+
+    # ---- Balanced book: 0.5 * short + 0.5 * SPY (SPY flat → 0.5 * short) ----
+    expected_bal = [0.5 * v for v in expected_short]
+    np.testing.assert_allclose(balanced.values, expected_bal, atol=1e-12)

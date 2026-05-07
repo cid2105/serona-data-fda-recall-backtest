@@ -28,6 +28,31 @@ c3.metric("Signal date range",
           f"{sig_first.strftime('%b %Y')} → {sig_last.strftime('%b %Y')}")
 c4.metric("Trading days in price panel", f"{n_days:,}")
 
+
+# ---- What the probability classes mean ------------------------------------
+st.markdown(
+    f"""
+    <div style="margin: 1.6rem 0 0.4rem 0; color: {BRAND_SLATE};
+                font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em;
+                text-transform: uppercase;">
+      What the probability classes mean
+    </div>
+    <div style="border: 1px solid #DAE6F5; border-radius: 12px;
+                padding: 0.95rem 1.2rem; background: {BRAND_BLUE_TINT}33;
+                color: #334155; font-size: 0.92rem; line-height: 1.55;">
+      Each <code>(ticker, AE-date)</code> signal carries three model-predicted probabilities
+      that a recall will follow within a given horizon:
+      <ul style="margin: 0.4rem 0 0.2rem 1.1rem;">
+        <li><code style="color: {BRAND_BLUE}; font-weight: 600;">p0</code> — probability of a recall within <strong>30 days</strong></li>
+        <li><code style="color: {BRAND_BLUE}; font-weight: 600;">p1</code> — probability of a recall within <strong>60 days</strong></li>
+        <li><code style="color: {BRAND_BLUE}; font-weight: 600;">p2</code> — probability of a recall within <strong>90 days</strong></li>
+      </ul>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 st.markdown(
     f"""
     <div style="margin: 1.6rem 0 0.4rem 0; color: {BRAND_SLATE};

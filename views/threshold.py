@@ -62,6 +62,9 @@ with st.sidebar:
 with st.expander("Strategy rules", expanded=False):
     st.markdown(
         """
+**Probability classes** — `p0` = probability of a recall within **30 days**,
+`p1` = within **60 days**, `p2` = within **90 days** of the AE date.
+
 **Entry**
 
 - When `condition(p0, p1, p2)`'s factor exceeds `entry_threshold` for ticker `T` on day `d`

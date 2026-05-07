@@ -1,0 +1,70 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Notebooks
+notebooks/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Testing / type-checking caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Logs
+*.log
+
+# Pipeline intermediates (not needed by the deployed app)
+ticker_mapping/llm_files/llm_mapping_results.jsonl
+ticker_mapping/llm_files/llm_mapping_results.csv
+ticker_mapping/fuzzy_matching/fuzzy_matches_results.csv
+ticker_mapping/fuzzy_matching/no_matches.csv
+ticker_mapping/fuzzy_matching/fuzzy_matches_with_names.csv
+ticker_mapping/fuzzy_matching/high_confidence_with_names.csv
+ticker_mapping/fuzzy_matching/combined_mappings_with_names.csv
+ticker_mapping/fuzzy_matching/ticker_variants_summary.csv
+ticker_mapping/fuzzy_matching/review_matches.csv
+ticker_mapping/fuzzy_matching/hybrid_*.csv
+ticker_mapping/events_by_ticker_year.csv
+ticker_mapping/events_mapped_by_device_year.csv
+.spark-staging/

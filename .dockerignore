@@ -1,0 +1,54 @@
+# Git / CI
+.git
+.gitignore
+.github/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs / editors / OS
+venv/
+.venv/
+env/
+.vscode/
+.idea/
+.DS_Store
+
+# Secrets / env files
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Tests not needed at runtime
+tests/
+
+# Notebooks — dev only, large, not used by the app
+notebooks/*.ipynb
+ticker_mapping/*.ipynb
+ticker_mapping/fuzzy_matching/*.ipynb
+.ipynb_checkpoints/
+
+# Pipeline scripts and intermediates not used by the running app
+run_ticker_map_and_metadata.py
+ticker_mapping/export_events.py
+ticker_mapping/join_tickers.py
+ticker_mapping/tagging_process.py
+ticker_mapping/pipeline_utils.py
+ticker_mapping/fuzzy_matching/fuzzy_matcher.py
+ticker_mapping/fuzzy_matching/llm_fuzzy_hybrid_matcher.py
+ticker_mapping/fuzzy_matching/all_manus.csv
+ticker_mapping/fuzzy_matching/manu_ticker_mappings.csv
+ticker_mapping/fuzzy_matching/high_confidence_matches.csv
+ticker_mapping/llm_files/
+ticker_mapping/requirements.txt
+
+# Docs
+README.md
+*.md

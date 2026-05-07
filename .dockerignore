@@ -29,8 +29,8 @@ env/
 # Tests not needed at runtime
 tests/
 
-# Notebooks — dev only, large, not used by the app
-notebooks/*.ipynb
+# Notebooks — dev only, large, not used by the app (runtime data is in /data)
+notebooks/
 ticker_mapping/*.ipynb
 ticker_mapping/fuzzy_matching/*.ipynb
 .ipynb_checkpoints/

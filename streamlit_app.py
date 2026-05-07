@@ -24,7 +24,7 @@ from strategy import (
 warnings.filterwarnings("ignore")
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "notebooks" / "data"
+DATA_DIR = ROOT / "data"
 MAPPING_CSV = ROOT / "ticker_mapping" / "fuzzy_matching" / "combined_mappings.csv"
 
 

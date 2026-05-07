@@ -17,8 +17,19 @@ venv/
 env/
 ENV/
 
-# Notebooks
+# Notebooks (dev only — runtime data lives in /data at the repo root)
 notebooks/
+
+# Pipeline-only code (not used by the streamlit app)
+constants.py
+run_ticker_map_and_metadata.py
+
+# ticker_mapping: ignore everything except combined_mappings.csv,
+# which the deployed app loads at runtime
+ticker_mapping/*
+!ticker_mapping/fuzzy_matching/
+ticker_mapping/fuzzy_matching/*
+!ticker_mapping/fuzzy_matching/combined_mappings.csv
 
 # Environment / secrets
 .env
@@ -54,17 +65,4 @@ coverage.xml
 # Logs
 *.log
 
-# Pipeline intermediates (not needed by the deployed app)
-ticker_mapping/llm_files/llm_mapping_results.jsonl
-ticker_mapping/llm_files/llm_mapping_results.csv
-ticker_mapping/fuzzy_matching/fuzzy_matches_results.csv
-ticker_mapping/fuzzy_matching/no_matches.csv
-ticker_mapping/fuzzy_matching/fuzzy_matches_with_names.csv
-ticker_mapping/fuzzy_matching/high_confidence_with_names.csv
-ticker_mapping/fuzzy_matching/combined_mappings_with_names.csv
-ticker_mapping/fuzzy_matching/ticker_variants_summary.csv
-ticker_mapping/fuzzy_matching/review_matches.csv
-ticker_mapping/fuzzy_matching/hybrid_*.csv
-ticker_mapping/events_by_ticker_year.csv
-ticker_mapping/events_mapped_by_device_year.csv
 .spark-staging/

@@ -190,7 +190,7 @@ def inject_chrome():
 @st.cache_data(show_spinner="Loading + joining predictions and tickers...")
 def load_signals():
     cc = pd.read_csv(DATA_DIR / "CoreCoverage.tsv", sep="\t")
-    pred = pd.read_parquet(DATA_DIR / "260420_preds_and_recalls_stored.parquet")
+    pred = pd.read_parquet(DATA_DIR / "predictions_with_base.parquet")
     mp = pd.read_csv(MAPPING_CSV)
 
     core = set(cc["Ticker"].str.upper())
@@ -208,7 +208,7 @@ def load_signals():
 
 @st.cache_data(show_spinner="Loading prices...")
 def _load_prices_raw():
-    px = pd.read_parquet(DATA_DIR / "yf_adj_close_2025.parquet")
+    px = pd.read_parquet(DATA_DIR / "yf_adj_close.parquet")
     if "date" in px.columns:
         px = px.set_index("date")
     px.index = pd.DatetimeIndex(px.index).tz_localize(None).normalize()

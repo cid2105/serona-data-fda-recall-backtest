@@ -17,16 +17,21 @@ n_signals = len(sig)
 sig_first = sig["signal_date"].min()
 sig_last = sig["signal_date"].max()
 n_days = len(prices.index)
+years_history = (sig_last - sig_first).days / 365.25
 
 # ---- High-level KPIs about the underlying dataset (NOT a backtest) ----
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Tickers in universe", f"{universe_size:,}",
           help="Unique CoreCoverage tickers with at least one model prediction.")
-c2.metric("Signal rows", f"{n_signals:,}",
+c2.metric("AE signal rows", f"{n_signals:,}",
           help="Distinct (ticker, AE date) signal rows after joining predictions to tickers.")
-c3.metric("Signal date range",
-          f"{sig_first.strftime('%b %Y')} → {sig_last.strftime('%b %Y')}")
-c4.metric("Trading days in price panel", f"{n_days:,}")
+c3.metric("AE date range",
+          f"{sig_first.strftime('%b %Y')} → {sig_last.strftime('%b %Y')}",
+          help=f"Earliest: {sig_first.strftime('%b %d, %Y')} · "
+               f"Latest: {sig_last.strftime('%b %d, %Y')}.")
+c4.metric("Years of history", f"{years_history:.1f} yrs",
+          help=f"Span from earliest to latest AE date. Price panel covers "
+               f"{n_days:,} trading days for backtest runway on both ends.")
 
 
 # ---- What the probability classes mean ------------------------------------

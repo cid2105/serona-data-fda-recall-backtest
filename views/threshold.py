@@ -41,7 +41,7 @@ with st.sidebar:
         help="OR rules use max(...) for ranking — short when any of the listed probabilities "
              "exceeds the entry threshold.",
     )
-    threshold = st.slider("Entry threshold", 0.0, 1.0, 0.60, 0.01,
+    threshold = st.slider("Entry threshold", 0.0, 1.0, 0.50, 0.01,
                           help="Position opens when the condition's factor > this value.")
     exit_threshold = st.slider(
         "Exit threshold (early exit if p < threshold)", 0.0, 1.0, 0.40, 0.01,

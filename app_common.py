@@ -204,7 +204,13 @@ def check_password() -> bool:
     if st.session_state.get("_password_correct"):
         return True
 
-    if "app_password" not in st.secrets:
+    # Read the expected password; handle both "file missing" and "key missing".
+    # st.secrets[...] raises StreamlitSecretNotFoundError if the secrets file
+    # doesn't exist (different exception type than a plain KeyError), so catch
+    # broadly here — either way it's a user-config issue with the same fix.
+    try:
+        expected_password = st.secrets["app_password"]
+    except Exception:
         st.error(
             "App password not configured. Add `app_password = \"...\"` to "
             "`.streamlit/secrets.toml` (local) or the Streamlit Cloud Secrets pane."
@@ -214,7 +220,7 @@ def check_password() -> bool:
     def _on_submit():
         if hmac.compare_digest(
             st.session_state.get("_password_input", ""),
-            st.secrets["app_password"],
+            expected_password,
         ):
             st.session_state["_password_correct"] = True
             # Don't keep the cleartext password around in session state.

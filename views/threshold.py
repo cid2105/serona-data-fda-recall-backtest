@@ -44,7 +44,7 @@ with st.sidebar:
     threshold = st.slider("Entry threshold", 0.0, 1.0, 0.50, 0.01,
                           help="Position opens when the condition's factor > this value.")
     exit_threshold = st.slider(
-        "Exit threshold (early exit if p < threshold)", 0.0, 1.0, 0.40, 0.01,
+        "Exit threshold (early exit if p < threshold)", 0.0, 1.0, 0.0, 0.01,
         help="If a later ticker-day shows factor < this value, close the position early at the "
              "exit signal's trade date. 0 disables early exit. Must be strictly < entry threshold.",
     )

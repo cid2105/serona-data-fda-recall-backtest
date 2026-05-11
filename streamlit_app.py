@@ -10,11 +10,15 @@ import warnings
 
 import streamlit as st
 
-from app_common import inject_chrome
+from app_common import check_password, inject_chrome
 
 warnings.filterwarnings("ignore")
 
 inject_chrome()
+
+# Password gate — hero is already rendered above, so the gate shows under the brand.
+if not check_password():
+    st.stop()
 
 home = st.Page("views/home.py",      title="Overview",          icon=":material/home:",        default=True)
 threshold = st.Page("views/threshold.py", title="Threshold Backtest", icon=":material/tune:",        url_path="threshold")

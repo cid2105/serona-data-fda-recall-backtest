@@ -214,68 +214,70 @@ def check_password() -> bool:
     Authentication persists for the session via ``st.session_state`` — users
     aren't re-prompted when navigating between pages.
     """
-    if _is_localhost():
-        return True
+    return True
 
-    if st.session_state.get("_password_correct"):
-        return True
+    # if _is_localhost():
+    #     return True
 
-    # Read the expected password; handle both "file missing" and "key missing".
-    # st.secrets[...] raises StreamlitSecretNotFoundError if the secrets file
-    # doesn't exist (different exception type than a plain KeyError), so catch
-    # broadly here — either way it's a user-config issue with the same fix.
-    try:
-        expected_password = st.secrets["app_password"]
-    except Exception:
-        st.error(
-            "App password not configured. Add `app_password = \"...\"` to "
-            "the Streamlit Cloud Secrets pane (Settings → Secrets)."
-        )
-        return False
+    # if st.session_state.get("_password_correct"):
+    #     return True
 
-    def _on_submit():
-        if hmac.compare_digest(
-            st.session_state.get("_password_input", ""),
-            expected_password,
-        ):
-            st.session_state["_password_correct"] = True
-            # Don't keep the cleartext password around in session state.
-            st.session_state.pop("_password_input", None)
-        else:
-            st.session_state["_password_correct"] = False
+    # # Read the expected password; handle both "file missing" and "key missing".
+    # # st.secrets[...] raises StreamlitSecretNotFoundError if the secrets file
+    # # doesn't exist (different exception type than a plain KeyError), so catch
+    # # broadly here — either way it's a user-config issue with the same fix.
+    # try:
+    #     expected_password = st.secrets["app_password"]
+    # except Exception:
+    #     st.error(
+    #         "App password not configured. Add `app_password = \"...\"` to "
+    #         "the Streamlit Cloud Secrets pane (Settings → Secrets)."
+    #     )
+    #     return False
 
-    st.markdown(
-        f"""
-        <div style="max-width: 420px; margin: 3rem auto 1rem auto;
-                    padding: 1.6rem 1.8rem 1.2rem 1.8rem;
-                    border: 1px solid #DAE6F5; border-radius: 14px;
-                    background: linear-gradient(180deg, #FFFFFF 0%, {BRAND_BLUE_TINT}33 100%);
-                    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);">
-          <div style="font-weight: 700; color: {BRAND_NAVY}; font-size: 1.15rem;
-                      letter-spacing: -0.01em; margin-bottom: 0.35rem;">
-            Restricted access
-          </div>
-          <div style="color: {BRAND_SLATE}; font-size: 0.92rem; line-height: 1.5;">
-            Enter the access password to view the backtest dashboard.
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    # Center the input under the card via columns trick.
-    _, mid, _ = st.columns([1, 2, 1])
-    with mid:
-        st.text_input(
-            "Password",
-            type="password",
-            key="_password_input",
-            on_change=_on_submit,
-            label_visibility="collapsed",
-            placeholder="Password",
-        )
-        if st.session_state.get("_password_correct") is False:
-            st.error("Incorrect password.")
-    return False
+    # def _on_submit():
+    #     if hmac.compare_digest(
+    #         st.session_state.get("_password_input", ""),
+    #         expected_password,
+    #     ):
+    #         st.session_state["_password_correct"] = True
+    #         # Don't keep the cleartext password around in session state.
+    #         st.session_state.pop("_password_input", None)
+    #     else:
+    #         st.session_state["_password_correct"] = False
+
+    # st.markdown(
+    #     f"""
+    #     <div style="max-width: 420px; margin: 3rem auto 1rem auto;
+    #                 padding: 1.6rem 1.8rem 1.2rem 1.8rem;
+    #                 border: 1px solid #DAE6F5; border-radius: 14px;
+    #                 background: linear-gradient(180deg, #FFFFFF 0%, {BRAND_BLUE_TINT}33 100%);
+    #                 box-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);">
+    #       <div style="font-weight: 700; color: {BRAND_NAVY}; font-size: 1.15rem;
+    #                   letter-spacing: -0.01em; margin-bottom: 0.35rem;">
+    #         Restricted access
+    #       </div>
+    #       <div style="color: {BRAND_SLATE}; font-size: 0.92rem; line-height: 1.5;">
+    #         Enter the access password to view the backtest dashboard.
+    #       </div>
+    #     </div>
+    #     """,
+    #     unsafe_allow_html=True,
+    # )
+    # # Center the input under the card via columns trick.
+    # _, mid, _ = st.columns([1, 2, 1])
+    # with mid:
+    #     st.text_input(
+    #         "Password",
+    #         type="password",
+    #         key="_password_input",
+    #         on_change=_on_submit,
+    #         label_visibility="collapsed",
+    #         placeholder="Password",
+    #     )
+    #     if st.session_state.get("_password_correct") is False:
+    #         st.error("Incorrect password.")
+    # return False
 
 
 # ---------------------------------------------------------------------------

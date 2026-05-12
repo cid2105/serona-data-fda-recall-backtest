@@ -181,17 +181,21 @@ def test_simulate_single_signal_daily_marks(synthetic_prices):
     assert nonzero.index[0] == synthetic_prices.index[2]
 
 
-def test_simulate_balanced_is_50_50_spy_plus_short(synthetic_prices):
-    """Balanced = 0.5*short_book + 0.5*SPY. SPY drifts +0.1%/day.
-    On the held day: 0.5*(-0.01) + 0.5*0.001 = -0.0045.
-    On other days: 0.5*0 + 0.5*0.001 = +0.0005."""
+def test_simulate_balanced_is_50_50_spy_plus_short_only_when_position_held(synthetic_prices):
+    """Balanced book = 0.5*short + 0.5*SPY ONLY on days a short position is live.
+    On no-position days both legs are flat — balanced = 0. SPY drifts +0.1%/day in
+    this fixture, but the long leg is gated by basket activity so it only contributes
+    on the day a short is actually held."""
     sig = pd.DataFrame([_signal("A", "2025-01-02")])
     _, short_book, balanced = simulate(sig, synthetic_prices, "p2 > t", 0.5, 1, 1)
-    # Day 2 (held)
+    # Day 2 (held): 0.5 * (-0.01) + 0.5 * 0.001 = -0.0045
     expected_held = 0.5 * (-0.01) + 0.5 * 0.001
     assert balanced.iloc[2] == pytest.approx(expected_held, abs=1e-9)
-    # Day 1 (no short, just SPY)
-    assert balanced.iloc[1] == pytest.approx(0.5 * 0.001, abs=1e-9)
+    # Day 1 (no short): both legs at 0 → balanced = 0 (NOT 0.5 * SPY return).
+    assert balanced.iloc[1] == pytest.approx(0.0, abs=1e-12)
+    # Day 3+ (after exit): same — no position, no hedge, flat.
+    for i in range(3, len(balanced)):
+        assert balanced.iloc[i] == pytest.approx(0.0, abs=1e-12), f"day {i}"
 
 
 def test_simulate_multi_ticker_basket_is_equal_weight_average(synthetic_prices):
@@ -316,14 +320,24 @@ def test_rule_short_book_is_neg_mean_of_held_stock_returns(synthetic_prices):
     assert short_book.iloc[2] == pytest.approx(-(a_ret + b_ret) / 2, abs=1e-12)
 
 
-def test_rule_balanced_is_half_short_plus_half_spy_every_day(synthetic_prices):
-    """For every trading day d: balanced[d] == 0.5 * short_book[d] + 0.5 * SPY_daily_return[d].
-    Holds even on days where short_book=0 (then balanced is just half SPY's return)."""
+def test_rule_balanced_gated_by_basket_activity(synthetic_prices):
+    """Balanced = 0.5 * short_book + 0.5 * SPY ONLY on days the short book is live.
+    Days with no held names → balanced = 0 (both legs flat, no exposure)."""
     sigs = pd.DataFrame([_signal("A", "2025-01-02")])
-    _, short_book, balanced = simulate(sigs, synthetic_prices, "p2 > t", 0.5, entry_delay=1, hold_days=2)
-    spy_ret = synthetic_prices["SPY"].pct_change(fill_method=None).fillna(0)
-    expected = 0.5 * short_book + 0.5 * spy_ret
-    pd.testing.assert_series_equal(balanced, expected, check_names=False, atol=1e-12)
+    s, short_book, balanced = simulate(sigs, synthetic_prices, "p2 > t", 0.5,
+                                       entry_delay=1, hold_days=2)
+    # Days the basket is active: held window is [trade_date+1, exit_date].
+    sizes = basket_size_daily(s, synthetic_prices.index)
+    active_mask = (sizes > 0).to_numpy()
+    spy_ret = synthetic_prices["SPY"].pct_change(fill_method=None).fillna(0).to_numpy()
+    expected = np.where(
+        active_mask,
+        0.5 * short_book.to_numpy() + 0.5 * spy_ret,
+        0.0,
+    )
+    np.testing.assert_allclose(balanced.to_numpy(), expected, atol=1e-12)
+    # Sanity: at least one active day, at least one inactive day in this scenario.
+    assert active_mask.any() and (~active_mask).any()
 
 
 def test_rule_no_signal_after_window_means_zero_pnl(synthetic_prices):
@@ -521,14 +535,38 @@ def test_bottom_k_per_date_independent(synthetic_prices):
     assert chosen_by_date[pd.Timestamp("2025-01-03")] == "B"
 
 
-def test_bottom_k_balanced_book_is_50_50_spy_plus_short(synthetic_prices):
-    """Balanced book formula must hold for bottom-K too: 0.5 * short + 0.5 * SPY."""
+def test_bottom_k_balanced_gated_by_basket_activity(synthetic_prices):
+    """Same gating rule as the threshold simulator: balanced[d] = 0.5 * short + 0.5 * SPY
+    only on days the short book is live; otherwise 0."""
     sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.05)])
-    _, short_book, balanced = simulate_bottom_k(sigs, synthetic_prices, "p0",
+    s, short_book, balanced = simulate_bottom_k(sigs, synthetic_prices, "p0",
                                                 k=1, entry_delay=1, hold_days=1)
-    spy_ret = synthetic_prices["SPY"].pct_change(fill_method=None).fillna(0)
-    expected = 0.5 * short_book + 0.5 * spy_ret
-    pd.testing.assert_series_equal(balanced, expected, check_names=False, atol=1e-12)
+    sizes = basket_size_daily(s, synthetic_prices.index)
+    active_mask = (sizes > 0).to_numpy()
+    spy_ret = synthetic_prices["SPY"].pct_change(fill_method=None).fillna(0).to_numpy()
+    expected = np.where(
+        active_mask,
+        0.5 * short_book.to_numpy() + 0.5 * spy_ret,
+        0.0,
+    )
+    np.testing.assert_allclose(balanced.to_numpy(), expected, atol=1e-12)
+
+
+def test_balanced_book_is_strictly_zero_when_basket_empty(synthetic_prices):
+    """The strict invariant: on any day with NO held names, the balanced book MUST
+    return exactly 0 — both legs flat, no exposure, no drift from SPY. Verifies the
+    "no recall position → no hedge" semantic explicitly across a multi-window run."""
+    # Short A for days 2–3 (hold=2). Days 0,1,4,5,...,9 have no positions.
+    sigs = pd.DataFrame([_signal("A", "2025-01-02", p2=0.99)])
+    s, short_book, balanced = simulate(sigs, synthetic_prices, "p2 > t", 0.5,
+                                       entry_delay=1, hold_days=2)
+    sizes = basket_size_daily(s, synthetic_prices.index).to_numpy()
+    inactive = sizes == 0
+    # Every inactive day: balanced is strictly 0 (not 0.5 * SPY).
+    assert inactive.any(), "test scenario must include some no-position days"
+    np.testing.assert_array_equal(balanced.to_numpy()[inactive], 0.0)
+    # And the short book is also 0 on those days (defensive — no leak).
+    np.testing.assert_array_equal(short_book.to_numpy()[inactive], 0.0)
 
 
 def test_bottom_k_raises_on_invalid_args(synthetic_prices):

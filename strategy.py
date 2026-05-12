@@ -264,6 +264,12 @@ def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
         # Cash benchmark: long leg returns 0 if SPY isn't in the price table.
         # Keeps `balanced_weight` semantics consistent (balanced = w·short + (1−w)·0).
         spy_ret = np.zeros(n_days)
+    # The SPY hedge only fires on days the short book is actually live. Days with no
+    # held names → both legs at 0 → balanced is flat (matches "we aren't running today,
+    # so there's no exposure on either side"). Without this gating the long leg would
+    # drift on every trading day and inflate Sharpe / cumulative return.
+    has_position = held.any(axis=1)
+    spy_ret = np.where(has_position, spy_ret, 0.0)
     balanced_daily = pd.Series(
         balanced_weight * short_book_daily.to_numpy() + (1 - balanced_weight) * spy_ret,
         index=trading_days,

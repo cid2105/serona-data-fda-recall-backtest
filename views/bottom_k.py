@@ -46,7 +46,7 @@ with st.sidebar:
     k_max = max(1, universe_size)
     k = st.number_input(
         "K (number of names to short per AE date)",
-        min_value=1, max_value=int(k_max), value=5, step=1,
+        min_value=1, max_value=int(k_max), value=10, step=1,
         help="Per signal_date, short the K tickers with the lowest factor.",
     )
     entry_delay = st.number_input("Entry delay (trading days after AE date)", 1, 60, 20, 1)

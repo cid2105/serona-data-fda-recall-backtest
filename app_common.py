@@ -188,19 +188,35 @@ def inject_chrome():
 # Password gate
 # ---------------------------------------------------------------------------
 
+def _is_localhost() -> bool:
+    """True iff the app is being served from localhost — i.e. local dev, not the
+    public Streamlit Cloud deployment. Used to skip the password gate during dev."""
+    try:
+        host = (st.context.headers.get("Host") or "").split(":")[0].lower()
+    except Exception:
+        return False
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+
+
 def check_password() -> bool:
     """Block the app until the shared password (``st.secrets['app_password']``)
     is entered correctly. Returns True once authenticated; renders an input form
     and returns False otherwise — the caller should ``st.stop()`` in that case.
 
-    Configure the password by adding to ``.streamlit/secrets.toml`` (local dev)
-    or the Secrets pane on Streamlit Community Cloud (production):
+    The gate is **bypassed automatically on localhost** so ``streamlit run`` on
+    your laptop never prompts. The deployed app on ``*.streamlit.app`` still
+    requires the password.
+
+    Configure the password by adding to the Streamlit Cloud Secrets pane:
 
         app_password = "your-shared-password"
 
     Authentication persists for the session via ``st.session_state`` — users
     aren't re-prompted when navigating between pages.
     """
+    if _is_localhost():
+        return True
+
     if st.session_state.get("_password_correct"):
         return True
 
@@ -213,7 +229,7 @@ def check_password() -> bool:
     except Exception:
         st.error(
             "App password not configured. Add `app_password = \"...\"` to "
-            "`.streamlit/secrets.toml` (local) or the Streamlit Cloud Secrets pane."
+            "the Streamlit Cloud Secrets pane (Settings → Secrets)."
         )
         return False
 

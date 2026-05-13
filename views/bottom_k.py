@@ -21,8 +21,6 @@ from app_common import (
 )
 
 
-show_data_health()
-
 sig = load_signals()
 prices = load_prices()
 
@@ -51,6 +49,15 @@ with st.sidebar:
     )
     entry_delay = st.number_input("Entry delay (trading days after AE date)", 1, 60, 20, 1)
     hold_days = st.number_input("Holding period (trading days)", 1, 120, 10, 1)
+    benchmark = st.selectbox(
+        "Long-leg benchmark",
+        ["SPY", "IHI"], index=0,
+        help="The long leg of the 50/50 market-neutral book. "
+             "SPY = S&P 500. IHI = iShares US Medical Devices ETF "
+             "(closer match to our medtech universe).",
+    )
+
+show_data_health(benchmark)
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +65,7 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 with st.expander("Strategy rules", expanded=False):
     st.markdown(
-        """
+        f"""
 **Probability classes** — `p0` = probability of a recall within **30 days**,
 `p1` = within **60 days**, `p2` = within **90 days** of the AE date.
 
@@ -80,7 +87,8 @@ with st.expander("Strategy rules", expanded=False):
 
 - `held(d)` = set of tickers with at least one active short on day `d` (binary basket).
 - `short_book[d] = −mean( r[d, t] for t in held(d) )`.
-- `balanced[d] = 0.5 × short_book[d] + 0.5 × SPY_return[d]`.
+- `balanced[d] = 0.5 × short_book[d] + 0.5 × {benchmark}_return[d]` on days the basket
+  is live; both legs flat (= 0) on days with no positions.
         """
     )
 
@@ -90,6 +98,7 @@ with st.expander("Strategy rules", expanded=False):
 # ---------------------------------------------------------------------------
 s, daily_short, daily_bal = simulate_bottom_k(
     sig, prices, cond, k=int(k), entry_delay=int(entry_delay), hold_days=int(hold_days),
+    benchmark=benchmark,
 )
 
 if daily_short.empty:
@@ -123,7 +132,7 @@ st.markdown(
     f"""
     <div class="section-meta">
       Bottom-K strategy · K = {int(k)} · {period_str}
-      <span class="pill">Market Neutral Book · 50% short / 50% SPY</span>
+      <span class="pill">Market Neutral Book · 50% short / 50% {benchmark}</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -165,7 +174,7 @@ fig.add_trace(go.Scatter(x=cum_short.index, y=cum_short.values,
                          hovertemplate="%{x|%b %d, %Y}<br>%{y:+.1f}%<extra></extra>"),
               row=1, col=1)
 fig.add_trace(go.Scatter(x=cum_bal.index, y=cum_bal.values,
-                         name="Balanced (0.5 short + 0.5 SPY)",
+                         name=f"Balanced (0.5 short + 0.5 {benchmark})",
                          line=dict(width=2.0, color=BRAND_AMBER),
                          hovertemplate="%{x|%b %d, %Y}<br>%{y:+.1f}%<extra></extra>"),
               row=1, col=1)

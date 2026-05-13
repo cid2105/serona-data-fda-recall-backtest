@@ -319,17 +319,17 @@ def load_prices():
     return clean_prices(_load_prices_raw())
 
 
-def show_data_health():
-    """Surface SPY data-quality issues at the top of strategy pages."""
+def show_data_health(benchmark: str = "SPY"):
+    """Surface benchmark data-quality issues at the top of strategy pages."""
     prices = load_prices()
-    if "SPY" in prices.columns:
-        spy_nan_dates = prices.index[prices["SPY"].isna()]
-        if len(spy_nan_dates):
+    if benchmark in prices.columns:
+        nan_dates = prices.index[prices[benchmark].isna()]
+        if len(nan_dates):
             st.caption(
-                f":warning: SPY benchmark has {len(spy_nan_dates)} missing day(s) — "
+                f":warning: {benchmark} benchmark has {len(nan_dates)} missing day(s) — "
                 f"treating those as 0% return. Affected: "
-                f"{', '.join(d.strftime('%Y-%m-%d') for d in spy_nan_dates[:5])}"
-                f"{' …' if len(spy_nan_dates) > 5 else ''}"
+                f"{', '.join(d.strftime('%Y-%m-%d') for d in nan_dates[:5])}"
+                f"{' …' if len(nan_dates) > 5 else ''}"
             )
 
 

@@ -134,7 +134,8 @@ def clean_prices(prices: pd.DataFrame, *, drop_all_nan: bool = True,
 
 def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
              threshold: float, entry_delay: int, hold_days: int,
-             balanced_weight: float = 0.5, exit_threshold: float = 0.0):
+             balanced_weight: float = 0.5, exit_threshold: float = 0.0,
+             benchmark: str = "SPY"):
     """Run the short-basket backtest. Returns (per-trade df, short_book daily Series,
     balanced daily Series). Both daily Series are indexed by every trading day in `prices`,
     with 0 on no-position days.
@@ -152,9 +153,12 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
       held(d) = {tickers with at least one active short on day d}
       r[d, t] = prices[d, t] / prices[d-1, t] - 1                          (1-day adj-close return)
       short_book[d] = -(1/|held(d)|) * sum_{t in held(d)} r[d, t]          (equal-weight, sign-flipped)
-      balanced[d]   = balanced_weight * short_book[d] + (1 - balanced_weight) * SPY_return[d]
+      balanced[d]   = balanced_weight * short_book[d] + (1 - balanced_weight) * benchmark_return[d]
 
-    Sharpe = mean/std × √252 of the daily series.
+    ``benchmark`` is the ticker symbol used as the long leg of the balanced book (default
+    "SPY"; pass "IHI" for a medical-device-focused benchmark, etc.). If the chosen ticker
+    isn't in the price table, the long leg falls back to cash (0% return). On no-position
+    days both legs are gated to 0 so the balanced book stays flat.
 
     The per-trade DataFrame carries each signal's compound stock-return between its actual entry
     and actual exit (early-exit-aware) for transparency.
@@ -222,15 +226,17 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
 
     return _compute_pnl_and_daily_series(
         s, prices, entry_idx_arr, exit_idx_arr, tk_col, balanced_weight,
+        benchmark=benchmark,
     )
 
 
 def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
-                                  tk_col, balanced_weight):
+                                  tk_col, balanced_weight, *, benchmark: str = "SPY"):
     """Shared P&L computation for both threshold and bottom-K simulators.
 
     `s` is the selected per-trade signal table (with `_factor` column). `entry_idx_arr` and
-    `exit_idx_arr` are aligned arrays of indices into `prices.index`. Returns the per-trade
+    `exit_idx_arr` are aligned arrays of indices into `prices.index`. ``benchmark`` is the
+    ticker used as the long leg of the balanced book (default "SPY"). Returns the per-trade
     table (with trade_date / exit_date / stock_ret / short_ret), the daily short-book
     return series, and the daily balanced-portfolio return series.
     """
@@ -258,20 +264,20 @@ def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
     basket_ret = np.where(np.isnan(basket_ret), 0.0, basket_ret)
     short_book_daily = pd.Series(-basket_ret, index=trading_days)
 
-    if "SPY" in prices.columns:
-        spy_ret = prices["SPY"].pct_change(fill_method=None).fillna(0).to_numpy()
+    if benchmark in prices.columns:
+        bench_ret = prices[benchmark].pct_change(fill_method=None).fillna(0).to_numpy()
     else:
-        # Cash benchmark: long leg returns 0 if SPY isn't in the price table.
+        # Cash benchmark: long leg returns 0 if the chosen ticker isn't in the price table.
         # Keeps `balanced_weight` semantics consistent (balanced = w·short + (1−w)·0).
-        spy_ret = np.zeros(n_days)
-    # The SPY hedge only fires on days the short book is actually live. Days with no
+        bench_ret = np.zeros(n_days)
+    # The long leg only fires on days the short book is actually live. Days with no
     # held names → both legs at 0 → balanced is flat (matches "we aren't running today,
     # so there's no exposure on either side"). Without this gating the long leg would
     # drift on every trading day and inflate Sharpe / cumulative return.
     has_position = held.any(axis=1)
-    spy_ret = np.where(has_position, spy_ret, 0.0)
+    bench_ret = np.where(has_position, bench_ret, 0.0)
     balanced_daily = pd.Series(
-        balanced_weight * short_book_daily.to_numpy() + (1 - balanced_weight) * spy_ret,
+        balanced_weight * short_book_daily.to_numpy() + (1 - balanced_weight) * bench_ret,
         index=trading_days,
     )
 
@@ -288,7 +294,7 @@ def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
 
 def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
                       k: int, entry_delay: int, hold_days: int,
-                      balanced_weight: float = 0.5):
+                      balanced_weight: float = 0.5, benchmark: str = "SPY"):
     """Bottom-K backtest. Per ENTRY TRADING DAY, rank tickers by
     ``factor_for_bottom_k(condition)`` and short the K names with the LOWEST factor.
     Each becomes an independent trade with entry at close of (signal_date +
@@ -360,6 +366,7 @@ def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
 
     return _compute_pnl_and_daily_series(
         s, prices, entry_idx_arr, exit_idx_arr, tk_col, balanced_weight,
+        benchmark=benchmark,
     )
 
 

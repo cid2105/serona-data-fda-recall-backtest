@@ -1,8 +1,8 @@
-"""Bottom-K Backtest page.
+"""Top-K Backtest page.
 
-Each AE date, rank tickers by ``factor_for_bottom_k(condition)`` and short the K names
-with the LOWEST factor. No thresholds. The trigger rule names are shared with the
-threshold strategy but multi-class rules use ``min`` instead of ``max``.
+Each AE date, rank tickers by ``factor_for_top_k(condition)`` and short the K names
+with the HIGHEST factor — same direction as the threshold strategy (short on HIGH
+recall probabilities), just ranked instead of cutoff-gated. No thresholds.
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from strategy import (
-    BOTTOM_K_RULES, simulate_bottom_k, sharpe, max_drawdown,
+    TOP_K_RULES, simulate_top_k, sharpe, max_drawdown,
     basket_size_daily, portfolio_turnover_daily,
 )
 from app_common import (
@@ -29,15 +29,15 @@ prices = load_prices()
 # Sidebar knobs
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Bottom-K Knobs")
+    st.header("Top-K Knobs")
     st.html("<br/>")
-    rule_keys = list(BOTTOM_K_RULES.keys())
+    rule_keys = list(TOP_K_RULES.keys())
     cond = st.selectbox(
         "Short Trigger Rule (ranking factor)", rule_keys,
         index=rule_keys.index("p2"),
         help="Single-class rules (p0, p1, p2) rank by that probability column. "
-             "Multi-class rules (min(p0, p1), min(p0, p1, p2)) take the min across the "
-             "listed columns. Bottom-K shorts the K names with the lowest factor on "
+             "Multi-class rules (max(p0, p1), max(p0, p1, p2)) take the max across the "
+             "listed columns. Top-K shorts the K names with the HIGHEST factor on "
              "each AE date.",
     )
     universe_size = sig["ticker"].nunique()
@@ -45,7 +45,7 @@ with st.sidebar:
     k = st.number_input(
         "K (number of names to short per AE date)",
         min_value=1, max_value=int(k_max), value=10, step=1,
-        help="Per signal_date, short the K tickers with the lowest factor.",
+        help="Per signal_date, short the K tickers with the highest factor.",
     )
     entry_delay = st.number_input("Entry delay (trading days after AE date)", 1, 60, 20, 1)
     hold_days = st.number_input("Holding period (trading days)", 1, 120, 10, 1)
@@ -73,9 +73,9 @@ with st.expander("Strategy rules", expanded=False):
 
 - For each `signal_date`, compute the factor across all tickers with predictions that day.
   Single-class rules (`p0`, `p1`, `p2`) use that probability. Multi-class rules
-  (`min(p0, p1)`, `min(p0, p1, p2)`) take the **min** across the listed columns —
-  the bottom of the distribution is what we short.
-- Take the **K tickers with the lowest factor** on that `signal_date` and open shorts.
+  (`max(p0, p1)`, `max(p0, p1, p2)`) take the **max** across the listed columns —
+  the top of the distribution is what we short (high recall probability).
+- Take the **K tickers with the highest factor** on that `signal_date` and open shorts.
 
 **Entry / hold**
 
@@ -96,7 +96,7 @@ with st.expander("Strategy rules", expanded=False):
 # ---------------------------------------------------------------------------
 # Run the backtest
 # ---------------------------------------------------------------------------
-s, daily_short, daily_bal = simulate_bottom_k(
+s, daily_short, daily_bal = simulate_top_k(
     sig, prices, cond, k=int(k), entry_delay=int(entry_delay), hold_days=int(hold_days),
     benchmark=benchmark,
 )
@@ -131,7 +131,7 @@ period_str = (f"{daily_short.index[0].strftime('%b %d, %Y')} → "
 st.markdown(
     f"""
     <div class="section-meta">
-      Bottom-K strategy · K = {int(k)} · {period_str}
+      Top-K strategy · K = {int(k)} · {period_str}
       <span class="pill">Market Neutral Book · 50% short / 50% {benchmark}</span>
     </div>
     """,

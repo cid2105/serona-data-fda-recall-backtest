@@ -15,8 +15,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from strategy import (  # noqa: E402
-    STRATEGIES, factor_for_condition, factor_for_bottom_k, normalize_manu,
-    simulate, simulate_bottom_k, sharpe, max_drawdown, basket_size_daily,
+    STRATEGIES, factor_for_condition, factor_for_top_k, normalize_manu,
+    simulate, simulate_top_k, sharpe, max_drawdown, basket_size_daily,
     portfolio_turnover_daily, validate_prices, clean_prices,
 )
 
@@ -108,40 +108,41 @@ def test_factor_for_condition_unknown_raises(small_sig):
 
 
 # -----------------------------------------------------------------------------
-# factor_for_bottom_k — multi-class rules use min instead of max
+# factor_for_top_k — multi-class rules use MAX (same direction as the threshold
+# strategy). Top-K shorts the K names with the HIGHEST factor per signal_date.
 # -----------------------------------------------------------------------------
 
-def test_factor_for_bottom_k_single_class_columns(small_sig):
+def test_factor_for_top_k_single_class_columns(small_sig):
     """Single-class rules return the corresponding probability column."""
     pd.testing.assert_series_equal(
-        factor_for_bottom_k(small_sig, "p0"), small_sig["prob_class_0"], check_names=False,
+        factor_for_top_k(small_sig, "p0"), small_sig["prob_class_0"], check_names=False,
     )
     pd.testing.assert_series_equal(
-        factor_for_bottom_k(small_sig, "p1"), small_sig["prob_class_1"], check_names=False,
+        factor_for_top_k(small_sig, "p1"), small_sig["prob_class_1"], check_names=False,
     )
     pd.testing.assert_series_equal(
-        factor_for_bottom_k(small_sig, "p2"), small_sig["prob_class_2"], check_names=False,
+        factor_for_top_k(small_sig, "p2"), small_sig["prob_class_2"], check_names=False,
     )
 
 
-def test_factor_for_bottom_k_min_rules(small_sig):
-    """Multi-class rules take the min across the listed columns. Bottom-K shorts the LOWEST factor."""
+def test_factor_for_top_k_max_rules(small_sig):
+    """Multi-class rules take the MAX across the listed columns. Top-K shorts the HIGHEST factor."""
     p0 = small_sig["prob_class_0"]
     p1 = small_sig["prob_class_1"]
     p2 = small_sig["prob_class_2"]
     pd.testing.assert_series_equal(
-        factor_for_bottom_k(small_sig, "min(p0, p1)"),
-        pd.concat([p0, p1], axis=1).min(axis=1),
+        factor_for_top_k(small_sig, "max(p0, p1)"),
+        pd.concat([p0, p1], axis=1).max(axis=1),
     )
     pd.testing.assert_series_equal(
-        factor_for_bottom_k(small_sig, "min(p0, p1, p2)"),
-        pd.concat([p0, p1, p2], axis=1).min(axis=1),
+        factor_for_top_k(small_sig, "max(p0, p1, p2)"),
+        pd.concat([p0, p1, p2], axis=1).max(axis=1),
     )
 
 
-def test_factor_for_bottom_k_unknown_raises(small_sig):
+def test_factor_for_top_k_unknown_raises(small_sig):
     with pytest.raises(ValueError):
-        factor_for_bottom_k(small_sig, "bogus")
+        factor_for_top_k(small_sig, "bogus")
 
 
 # -----------------------------------------------------------------------------
@@ -472,12 +473,12 @@ def test_simulate_invalid_args_raise(synthetic_prices):
 
 
 # -----------------------------------------------------------------------------
-# simulate_bottom_k — short the K names with the lowest factor each signal_date
+# simulate_top_k — short the K names with the HIGHEST factor each signal_date
 # -----------------------------------------------------------------------------
 
-def test_bottom_k_picks_lowest_factor_per_signal_date(synthetic_prices):
+def test_top_k_picks_highest_factor_per_signal_date(synthetic_prices):
     """Three tickers signal on the same day with distinct p0 values. With K=2 and rule
-    `p0`, bottom-K should pick the two LOWEST p0 — A (0.10) and B (0.20), NOT C (0.90)."""
+    `p0`, top-K should pick the two HIGHEST p0 — C (0.90) and B (0.20), NOT A (0.10)."""
     px = synthetic_prices.copy()
     px["C"] = 80 * (1.005 ** np.arange(len(px)))   # gently drifting third name
     sigs = pd.DataFrame([
@@ -485,62 +486,63 @@ def test_bottom_k_picks_lowest_factor_per_signal_date(synthetic_prices):
         _signal("B", "2025-01-02", p0=0.20, p1=0.40, p2=0.40),
         _signal("C", "2025-01-02", p0=0.90, p1=0.05, p2=0.05),
     ])
-    s, _, _ = simulate_bottom_k(sigs, px, "p0", k=2, entry_delay=1, hold_days=1)
+    s, _, _ = simulate_top_k(sigs, px, "p0", k=2, entry_delay=1, hold_days=1)
     chosen = set(s["ticker"])
-    assert chosen == {"A", "B"}
+    assert chosen == {"C", "B"}
 
 
-def test_bottom_k_holds_full_window_no_early_exit(synthetic_prices):
-    """Bottom-K has no early-exit logic. A position entered on day 0 with hold=5 must
+def test_top_k_holds_full_window_no_early_exit(synthetic_prices):
+    """Top-K has no early-exit logic. A position entered on day 0 with hold=5 must
     contribute P&L on EXACTLY days 2..6 (entry day 1 → P&L on days 2..6)."""
-    sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.05)])
-    _, short_book, _ = simulate_bottom_k(sigs, synthetic_prices, "p0",
+    sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.95)])
+    _, short_book, _ = simulate_top_k(sigs, synthetic_prices, "p0",
                                          k=1, entry_delay=1, hold_days=5)
     nz = short_book[short_book != 0]
     assert list(nz.index) == [synthetic_prices.index[i] for i in (2, 3, 4, 5, 6)]
 
 
-def test_bottom_k_uses_min_for_multi_class_rule(synthetic_prices):
-    """Under `min(p0, p1)` the factor is the per-row min. Three tickers with distinct mins:
-    A min=0.10, B min=0.30, C min=0.05. With K=2 we expect the TWO lowest mins → C (0.05) and A (0.10)."""
+def test_top_k_uses_max_for_multi_class_rule(synthetic_prices):
+    """Under `max(p0, p1)` the factor is the per-row max. Three tickers with distinct maxes:
+    A max=0.95, B max=0.40, C max=0.95. With K=2 we expect the TWO highest maxes → {A, C}
+    (ties broken by ticker name, both tied at 0.95)."""
     px = synthetic_prices.copy()
     px["C"] = 80 * (1.005 ** np.arange(len(px)))
     sigs = pd.DataFrame([
-        _signal("A", "2025-01-02", p0=0.10, p1=0.95, p2=0.0),  # min = 0.10
-        _signal("B", "2025-01-02", p0=0.40, p1=0.30, p2=0.0),  # min = 0.30
-        _signal("C", "2025-01-02", p0=0.05, p1=0.95, p2=0.0),  # min = 0.05
+        _signal("A", "2025-01-02", p0=0.10, p1=0.95, p2=0.0),  # max = 0.95
+        _signal("B", "2025-01-02", p0=0.40, p1=0.30, p2=0.0),  # max = 0.40
+        _signal("C", "2025-01-02", p0=0.05, p1=0.95, p2=0.0),  # max = 0.95
     ])
-    s, _, _ = simulate_bottom_k(sigs, px, "min(p0, p1)",
-                                k=2, entry_delay=1, hold_days=1)
-    assert set(s["ticker"]) == {"C", "A"}
+    s, _, _ = simulate_top_k(sigs, px, "max(p0, p1)",
+                             k=2, entry_delay=1, hold_days=1)
+    assert set(s["ticker"]) == {"A", "C"}
 
 
-def test_bottom_k_per_date_independent(synthetic_prices):
+def test_top_k_per_date_independent(synthetic_prices):
     """K is applied PER signal_date. Two days, three tickers each, K=1 → 2 trades total
-    (one per day, the lowest-factor name on each day)."""
+    (one per day, the HIGHEST-factor name on each day — different ticker per day)."""
     px = synthetic_prices.copy()
     px["C"] = 80 * (1.005 ** np.arange(len(px)))
     sigs = pd.DataFrame([
         _signal("A", "2025-01-02", p0=0.10),
         _signal("B", "2025-01-02", p0=0.30),
-        _signal("C", "2025-01-02", p0=0.50),
-        _signal("A", "2025-01-03", p0=0.40),
+        _signal("C", "2025-01-02", p0=0.50),   # day-1 winner
+        _signal("A", "2025-01-03", p0=0.95),   # day-2 winner
         _signal("B", "2025-01-03", p0=0.05),
-        _signal("C", "2025-01-03", p0=0.50),
+        _signal("C", "2025-01-03", p0=0.30),
     ])
-    s, _, _ = simulate_bottom_k(sigs, px, "p0", k=1, entry_delay=1, hold_days=1)
+    s, _, _ = simulate_top_k(sigs, px, "p0", k=1, entry_delay=1, hold_days=1)
     assert len(s) == 2
     chosen_by_date = dict(zip(s["signal_date"], s["ticker"]))
-    assert chosen_by_date[pd.Timestamp("2025-01-02")] == "A"
-    assert chosen_by_date[pd.Timestamp("2025-01-03")] == "B"
+    assert chosen_by_date[pd.Timestamp("2025-01-02")] == "C"   # highest p0 = 0.50
+    assert chosen_by_date[pd.Timestamp("2025-01-03")] == "A"   # highest p0 = 0.95
 
 
-def test_bottom_k_balanced_gated_by_basket_activity(synthetic_prices):
+def test_top_k_balanced_gated_by_basket_activity(synthetic_prices):
     """Same gating rule as the threshold simulator: balanced[d] = 0.5 * short + 0.5 * SPY
     only on days the short book is live; otherwise 0."""
-    sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.05)])
-    s, short_book, balanced = simulate_bottom_k(sigs, synthetic_prices, "p0",
-                                                k=1, entry_delay=1, hold_days=1)
+    sigs = pd.DataFrame([_signal("A", "2025-01-02", p0=0.95)])
+    s, short_book, balanced = simulate_top_k(sigs, synthetic_prices, "p0",
+                                             k=1, entry_delay=1, hold_days=1)
     sizes = basket_size_daily(s, synthetic_prices.index)
     active_mask = (sizes > 0).to_numpy()
     spy_ret = synthetic_prices["SPY"].pct_change(fill_method=None).fillna(0).to_numpy()
@@ -569,38 +571,38 @@ def test_balanced_book_is_strictly_zero_when_basket_empty(synthetic_prices):
     np.testing.assert_array_equal(short_book.to_numpy()[inactive], 0.0)
 
 
-def test_bottom_k_raises_on_invalid_args(synthetic_prices):
+def test_top_k_raises_on_invalid_args(synthetic_prices):
     sigs = pd.DataFrame([_signal("A", "2025-01-02")])
     with pytest.raises(ValueError, match="entry_delay"):
-        simulate_bottom_k(sigs, synthetic_prices, "p0", k=1, entry_delay=0, hold_days=1)
+        simulate_top_k(sigs, synthetic_prices, "p0", k=1, entry_delay=0, hold_days=1)
     with pytest.raises(ValueError, match="hold_days"):
-        simulate_bottom_k(sigs, synthetic_prices, "p0", k=1, entry_delay=1, hold_days=0)
+        simulate_top_k(sigs, synthetic_prices, "p0", k=1, entry_delay=1, hold_days=0)
     with pytest.raises(ValueError, match="k"):
-        simulate_bottom_k(sigs, synthetic_prices, "p0", k=0, entry_delay=1, hold_days=1)
+        simulate_top_k(sigs, synthetic_prices, "p0", k=0, entry_delay=1, hold_days=1)
     with pytest.raises(ValueError, match="balanced_weight"):
-        simulate_bottom_k(sigs, synthetic_prices, "p0", k=1, entry_delay=1, hold_days=1,
-                          balanced_weight=1.5)
+        simulate_top_k(sigs, synthetic_prices, "p0", k=1, entry_delay=1, hold_days=1,
+                       balanced_weight=1.5)
 
 
-def test_bottom_k_empty_when_no_signals(synthetic_prices):
+def test_top_k_empty_when_no_signals(synthetic_prices):
     """Sig table missing required tickers → empty result."""
     sigs = pd.DataFrame(columns=["ticker", "signal_date",
                                  "prob_class_0", "prob_class_1", "prob_class_2"])
-    s, daily, daily_bal = simulate_bottom_k(sigs, synthetic_prices, "p0",
-                                            k=1, entry_delay=1, hold_days=1)
+    s, daily, daily_bal = simulate_top_k(sigs, synthetic_prices, "p0",
+                                         k=1, entry_delay=1, hold_days=1)
     assert s.empty and daily.empty and daily_bal.empty
 
 
-def test_bottom_k_pools_ae_dates_that_share_an_entry_day():
+def test_top_k_pools_ae_dates_that_share_an_entry_day():
     """When multiple AE dates roll forward to the same entry trading day (e.g. AE
-    dates over a weekend all rolling to Monday), bottom-K must pick K UNIQUE names
+    dates over a weekend all rolling to Monday), top-K must pick K UNIQUE names
     from the COMBINED pool — not K per AE date.
 
     Setup: bdate_range starting Thu Jan 2 makes
         dates[1] = Fri Jan 3,   dates[2] = Mon Jan 6.
     With entry_delay=1, all of {Fri, Sat, Sun} → entry_idx = 2 (Mon trade day).
     Six tickers spread over Fri/Sat/Sun signals; combined ranking by p0 picks the
-    K=2 lowest globally, not 2 per date.
+    K=2 HIGHEST globally, not 2 per date.
     """
     dates = pd.bdate_range("2025-01-02", periods=10)
     fri = pd.Timestamp("2025-01-03")  # trading day, dates[1]
@@ -610,28 +612,28 @@ def test_bottom_k_pools_ae_dates_that_share_an_entry_day():
     sigs = pd.DataFrame([
         _signal("A", fri, p0=0.10),
         _signal("B", fri, p0=0.20),
-        _signal("C", sat, p0=0.05),  # global lowest
+        _signal("C", sat, p0=0.05),
         _signal("D", sat, p0=0.15),
         _signal("E", sun, p0=0.25),
-        _signal("F", sun, p0=0.35),
+        _signal("F", sun, p0=0.95),  # global highest
     ])
-    # Combined ranking by p0: C(0.05) < A(0.10) < D(0.15) < B(0.20) < E < F.
-    # With K=2 we expect {C, A}, NOT 2 per AE-date which would give 6 trades.
+    # Combined ranking by p0 (descending): F(0.95) > E(0.25) > B(0.20) > D(0.15) > A(0.10) > C(0.05).
+    # With K=2 we expect {F, E}, NOT 2 per AE-date which would give 6 trades.
 
     prices = pd.DataFrame(
         {tk: [100.0] * 10 for tk in ["A", "B", "C", "D", "E", "F", "SPY"]},
         index=dates,
     )
-    s, _, _ = simulate_bottom_k(
+    s, _, _ = simulate_top_k(
         sigs, prices, "p0", k=2, entry_delay=1, hold_days=1,
     )
     assert len(s) == 2
-    assert set(s["ticker"]) == {"C", "A"}
+    assert set(s["ticker"]) == {"F", "E"}
 
 
-def test_bottom_k_dedupes_ticker_within_entry_day_group():
+def test_top_k_dedupes_ticker_within_entry_day_group():
     """If the same ticker appears in TWO AE-date signals that both roll to one
-    entry day, it should count once toward K — not twice."""
+    entry day, it should count once toward K — keeping the HIGHEST-factor row."""
     dates = pd.bdate_range("2025-01-02", periods=10)
     fri = pd.Timestamp("2025-01-03")
     sat = pd.Timestamp("2025-01-04")  # rolls to Mon = same entry as Fri
@@ -639,36 +641,36 @@ def test_bottom_k_dedupes_ticker_within_entry_day_group():
     # A appears twice (Fri and Sat) with different p0; B and C appear once each.
     sigs = pd.DataFrame([
         _signal("A", fri, p0=0.10),
-        _signal("A", sat, p0=0.05),  # A's lowest factor across the pool
+        _signal("A", sat, p0=0.95),  # A's HIGHEST factor across the pool
         _signal("B", fri, p0=0.20),
         _signal("C", sat, p0=0.30),
     ])
-    # Combined unique-ticker ranking: A(0.05), B(0.20), C(0.30).
-    # K=2 → {A, B}, with A's representative row carrying p0=0.05 (the lower one).
+    # Combined unique-ticker ranking (descending): A(0.95), C(0.30), B(0.20).
+    # K=2 → {A, C}, with A's representative row carrying p0=0.95 (the higher one).
 
     prices = pd.DataFrame(
         {tk: [100.0] * 10 for tk in ["A", "B", "C", "SPY"]},
         index=dates,
     )
-    s, _, _ = simulate_bottom_k(
+    s, _, _ = simulate_top_k(
         sigs, prices, "p0", k=2, entry_delay=1, hold_days=1,
     )
     assert len(s) == 2
-    assert set(s["ticker"]) == {"A", "B"}
+    assert set(s["ticker"]) == {"A", "C"}
     a_row = s[s["ticker"] == "A"].iloc[0]
-    assert a_row["prob_class_0"] == pytest.approx(0.05)
+    assert a_row["prob_class_0"] == pytest.approx(0.95)
 
 
-def test_bottom_k_skips_tickers_not_in_prices(synthetic_prices):
-    """A ticker not in the price table cannot be traded; bottom-K must ignore it even if
-    it would otherwise rank into the K cheapest."""
+def test_top_k_skips_tickers_not_in_prices(synthetic_prices):
+    """A ticker not in the price table cannot be traded; top-K must ignore it even if
+    it would otherwise rank into the K highest."""
     sigs = pd.DataFrame([
-        _signal("MISSING", "2025-01-02", p0=0.01),  # would rank lowest, but no prices
-        _signal("A",       "2025-01-02", p0=0.10),
+        _signal("MISSING", "2025-01-02", p0=0.99),  # would rank highest, but no prices
+        _signal("A",       "2025-01-02", p0=0.40),
         _signal("B",       "2025-01-02", p0=0.20),
     ])
-    s, _, _ = simulate_bottom_k(sigs, synthetic_prices, "p0",
-                                k=1, entry_delay=1, hold_days=1)
+    s, _, _ = simulate_top_k(sigs, synthetic_prices, "p0",
+                             k=1, entry_delay=1, hold_days=1)
     assert len(s) == 1
     assert s["ticker"].iloc[0] == "A"
 
@@ -1060,12 +1062,12 @@ def test_threshold_strategy_full_synthetic_validation():
     np.testing.assert_allclose(balanced.values, expected_bal, atol=1e-12)
 
 
-def test_bottom_k_strategy_full_synthetic_validation():
-    """End-to-end synthetic validation of the **Bottom-K** strategy.
+def test_top_k_strategy_full_synthetic_validation():
+    """End-to-end synthetic validation of the **Top-K** strategy.
 
     Spec we're verifying:
-      - On each signal_date, rank tickers by factor_for_bottom_k(condition) and
-        SHORT the K names with the LOWEST factor.
+      - On each signal_date, rank tickers by factor_for_top_k(condition) and
+        SHORT the K names with the HIGHEST factor.
       - Each pick enters at close of signal_date + entry_delay trading days and
         is held for exactly hold_days trading days. NO thresholds, NO early exit.
       - Same ticker can be picked on consecutive signal_dates; each pick spawns
@@ -1085,20 +1087,20 @@ def test_bottom_k_strategy_full_synthetic_validation():
         dates,
     )
 
-    # On d0: rank by p0 → A=0.10, B=0.20, D=0.30, C=0.50.  Bottom-2 = {A, B}.
-    # On d2: rank by p0 → B=0.05, C=0.30, A=0.40, D=0.50.  Bottom-2 = {B, C}.
+    # On d0: rank by p0 → A=0.95, B=0.85, D=0.20, C=0.10.  Top-2 = {A, B}.
+    # On d2: rank by p0 → B=0.95, C=0.85, A=0.10, D=0.20.  Top-2 = {B, C}.
     sigs = pd.DataFrame([
-        _signal("A", dates[0], p0=0.10),
-        _signal("B", dates[0], p0=0.20),
-        _signal("C", dates[0], p0=0.50),
-        _signal("D", dates[0], p0=0.30),
-        _signal("A", dates[2], p0=0.40),
-        _signal("B", dates[2], p0=0.05),
-        _signal("C", dates[2], p0=0.30),
-        _signal("D", dates[2], p0=0.50),
+        _signal("A", dates[0], p0=0.95),
+        _signal("B", dates[0], p0=0.85),
+        _signal("C", dates[0], p0=0.10),
+        _signal("D", dates[0], p0=0.20),
+        _signal("A", dates[2], p0=0.10),
+        _signal("B", dates[2], p0=0.95),
+        _signal("C", dates[2], p0=0.85),
+        _signal("D", dates[2], p0=0.20),
     ])
 
-    s, short_book, balanced = simulate_bottom_k(
+    s, short_book, balanced = simulate_top_k(
         sigs, prices, "p0", k=2, entry_delay=1, hold_days=2,
     )
 

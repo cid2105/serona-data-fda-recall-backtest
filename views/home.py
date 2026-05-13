@@ -99,13 +99,14 @@ with c_right:
         f"""
         <div style="{_card_style}">
           <div style="font-weight: 700; font-size: 1.1rem; color: {BRAND_BLUE_LIGHT}; margin-bottom: 0.4rem;">
-            <a href="/bottom-k" target="_self">Bottom-K Backtest</a>
+            <a href="/top-k" target="_self">Top-K Backtest</a>
           </div>
           <div style="color: #334155; font-size: 0.92rem; line-height: 1.5;">
-            Each AE date, rank tickers by the trigger-rule factor (using <em>min</em> for
-            multi-class rules) and short the K names with the lowest factor. No thresholds —
-            pure mechanical bottom-K selection. Tunes <em>K</em>, <em>entry delay</em>,
-            <em>holding period</em>, and the <em>trigger rule</em>.
+            Each AE date, rank tickers by the trigger-rule factor (using <em>max</em> for
+            multi-class rules) and short the K names with the highest factor — same
+            economic direction as the threshold strategy, just ranked instead of
+            cutoff-gated. Tunes <em>K</em>, <em>entry delay</em>, <em>holding period</em>,
+            and the <em>trigger rule</em>.
           </div>
         </div>
         """,

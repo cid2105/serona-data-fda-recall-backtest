@@ -66,28 +66,31 @@ def factor_for_condition(sig: pd.DataFrame, condition: str) -> pd.Series:
     raise ValueError(f"unknown condition: {condition}")
 
 
-# Bottom-K trigger rules. Each rule names a continuous ranking factor; bottom-K shorts
-# the K names with the LOWEST factor on each signal_date. Single-class rules collapse to
-# that probability column; multi-class rules take the min across the listed columns.
-BOTTOM_K_RULES: dict[str, str] = {
+# Top-K trigger rules. Each rule names a continuous ranking factor; top-K shorts the K
+# names with the HIGHEST factor on each signal_date — same direction as the threshold
+# strategy, just ranked instead of cutoff-gated. Single-class rules collapse to that
+# probability column; multi-class rules take the MAX across the listed columns.
+TOP_K_RULES: dict[str, str] = {
     "p0":              "p0",
     "p1":              "p1",
     "p2":              "p2",
-    "min(p0, p1)":     "min(p0, p1)",
-    "min(p0, p1, p2)": "min(p0, p1, p2)",
+    "max(p0, p1)":     "max(p0, p1)",
+    "max(p0, p1, p2)": "max(p0, p1, p2)",
 }
 
 
-def factor_for_bottom_k(sig: pd.DataFrame, condition: str) -> pd.Series:
-    """Continuous factor for bottom-K ranking. ``condition`` must be a key of
-    ``BOTTOM_K_RULES`` (e.g. ``"p0"``, ``"min(p0, p1)"``, ``"min(p0, p1, p2)"``)."""
+def factor_for_top_k(sig: pd.DataFrame, condition: str) -> pd.Series:
+    """Continuous factor for top-K ranking. ``condition`` must be a key of
+    ``TOP_K_RULES`` (e.g. ``"p0"``, ``"max(p0, p1)"``, ``"max(p0, p1, p2)"``).
+    The K names with the HIGHEST factor per signal_date are the short candidates —
+    same economic direction as the threshold strategy (short on HIGH recall probs)."""
     p0, p1, p2 = sig["prob_class_0"], sig["prob_class_1"], sig["prob_class_2"]
     if condition == "p0": return p0
     if condition == "p1": return p1
     if condition == "p2": return p2
-    if condition == "min(p0, p1)":     return pd.concat([p0, p1], axis=1).min(axis=1)
-    if condition == "min(p0, p1, p2)": return pd.concat([p0, p1, p2], axis=1).min(axis=1)
-    raise ValueError(f"unknown bottom-K rule: {condition}")
+    if condition == "max(p0, p1)":     return pd.concat([p0, p1], axis=1).max(axis=1)
+    if condition == "max(p0, p1, p2)": return pd.concat([p0, p1, p2], axis=1).max(axis=1)
+    raise ValueError(f"unknown top-K rule: {condition}")
 
 
 # -----------------------------------------------------------------------------
@@ -232,7 +235,7 @@ def simulate(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
 
 def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
                                   tk_col, balanced_weight, *, benchmark: str = "SPY"):
-    """Shared P&L computation for both threshold and bottom-K simulators.
+    """Shared P&L computation for both threshold and top-K simulators.
 
     `s` is the selected per-trade signal table (with `_factor` column). `entry_idx_arr` and
     `exit_idx_arr` are aligned arrays of indices into `prices.index`. ``benchmark`` is the
@@ -292,21 +295,22 @@ def _compute_pnl_and_daily_series(s, prices, entry_idx_arr, exit_idx_arr,
     return s, short_book_daily, balanced_daily
 
 
-def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
-                      k: int, entry_delay: int, hold_days: int,
-                      balanced_weight: float = 0.5, benchmark: str = "SPY"):
-    """Bottom-K backtest. Per ENTRY TRADING DAY, rank tickers by
-    ``factor_for_bottom_k(condition)`` and short the K names with the LOWEST factor.
-    Each becomes an independent trade with entry at close of (signal_date +
-    entry_delay trading days), held for ``hold_days``.
+def simulate_top_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
+                   k: int, entry_delay: int, hold_days: int,
+                   balanced_weight: float = 0.5, benchmark: str = "SPY"):
+    """Top-K backtest. Per ENTRY TRADING DAY, rank tickers by
+    ``factor_for_top_k(condition)`` and short the K names with the HIGHEST factor —
+    same direction as the threshold strategy (short on HIGH recall probs), just
+    ranked instead of cutoff-gated. Each pick becomes an independent trade with
+    entry at close of (signal_date + entry_delay trading days), held for ``hold_days``.
 
     Multiple AE dates that map to the SAME entry trading day (e.g. weekend AE dates
     rolling to Monday) are pooled into a single rank-and-pick — so the basket on
     each entry day has at most K *unique* names from one cohort, not K-per-AE-date.
-    Within an entry-day group, ticker duplicates are deduped (lowest-factor row
+    Within an entry-day group, ticker duplicates are deduped (highest-factor row
     kept) before the K cut.
 
-    No thresholds, no early exit — pure mechanical bottom-K selection.
+    No thresholds, no early exit — pure mechanical top-K selection.
     Daily P&L and balanced book share the same conventions as ``simulate``.
     """
     if entry_delay < 1:
@@ -322,7 +326,7 @@ def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
         cols = list(s_template.columns) + ["trade_date", "exit_date", "stock_ret", "short_ret"]
         return pd.DataFrame(columns=cols), pd.Series(dtype=float), pd.Series(dtype=float)
 
-    factor_vals = factor_for_bottom_k(sig, condition).to_numpy()
+    factor_vals = factor_for_top_k(sig, condition).to_numpy()
     sig_with_factor = sig.assign(_factor=factor_vals)
     sig_with_factor = sig_with_factor[sig_with_factor["ticker"].isin(prices.columns)]
     sig_with_factor = sig_with_factor.dropna(subset=["_factor"])
@@ -342,14 +346,14 @@ def simulate_bottom_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
     if sig_with_factor.empty:
         return _empty(sig)
 
-    # Bottom-K is computed PER ENTRY TRADING DAY, not per AE-calendar date. Multiple
+    # Top-K is computed PER ENTRY TRADING DAY, not per AE-calendar date. Multiple
     # AE dates that roll forward to the same entry day (e.g. weekend AE dates rolling
     # to Monday) get pooled into a single rank-and-pick — so the basket on each entry
-    # day has at most K *unique* names from a single cohort. Tie-break: lower factor
-    # first, then ticker name. Within an entry-day group, dedupe by ticker (keep the
-    # lowest-factor row) before taking head(K).
+    # day has at most K *unique* names from a single cohort. Sort factor DESCENDING so
+    # `head(K)` picks the K HIGHEST; tie-break by ticker name for determinism. Within
+    # an entry-day group, dedupe by ticker keeping the highest-factor row.
     s = (sig_with_factor
-         .sort_values(["_entry_idx", "_factor", "ticker"])
+         .sort_values(["_entry_idx", "_factor", "ticker"], ascending=[True, False, True])
          .drop_duplicates(subset=["_entry_idx", "ticker"], keep="first")
          .groupby("_entry_idx", as_index=False, sort=False)
          .head(k)

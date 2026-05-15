@@ -35,14 +35,14 @@ with st.sidebar:
     strategy_keys = list(STRATEGIES.keys())
     cond = st.selectbox(
         "Short Trigger Rule (short fires on condition)", strategy_keys,
-        index=strategy_keys.index("p0 > t OR p1 > t"),
+        index=strategy_keys.index("p1 > t"),
         help="OR rules use max(...) for ranking — short when any of the listed probabilities "
              "exceeds the entry threshold.",
     )
     threshold = st.slider("Entry threshold", 0.0, 1.0, 0.50, 0.01,
                           help="Position opens when the condition's factor > this value.")
     exit_threshold = st.slider(
-        "Exit threshold (early exit if p < threshold)", 0.0, 1.0, 0.0, 0.01,
+        "Exit threshold (early exit if p < threshold)", 0.0, 1.0, 0.4, 0.01,
         help="If a later ticker-day shows factor < this value, close the position early at the "
              "exit signal's trade date. 0 disables early exit. Must be strictly < entry threshold.",
     )
@@ -54,7 +54,7 @@ with st.sidebar:
     hold_days = st.number_input("Holding period (trading days)", 1, 120, 20, 1)
     benchmark = st.selectbox(
         "Long-leg benchmark",
-        ["SPY", "IHI"], index=0,
+        ["SPY", "IHI"], index=1,
         help="The long leg of the 50/50 market-neutral book. "
              "SPY = S&P 500. IHI = iShares US Medical Devices ETF "
              "(closer match to our medtech universe).",

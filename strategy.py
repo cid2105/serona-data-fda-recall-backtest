@@ -70,11 +70,14 @@ def factor_for_condition(sig: pd.DataFrame, condition: str) -> pd.Series:
 # names with the HIGHEST factor on each signal_date — same direction as the threshold
 # strategy, just ranked instead of cutoff-gated. Single-class rules collapse to that
 # probability column; multi-class rules take the MAX across the listed columns.
+#
+# Only rules that empirically rank in the hypothesized direction (HIGH prob → LOW
+# future return, by the Q1−Q4 forward-return analysis in notebooks/scratch.ipynb)
+# are exposed here. ``p0``, ``p1``, and ``max(p0, p1)`` were systematically inverted
+# in that study and have been removed. ``factor_for_top_k`` still accepts those keys
+# for diagnostic use, but the UI dropdowns won't surface them.
 TOP_K_RULES: dict[str, str] = {
-    "p0":              "p0",
-    "p1":              "p1",
     "p2":              "p2",
-    "max(p0, p1)":     "max(p0, p1)",
     "max(p0, p1, p2)": "max(p0, p1, p2)",
 }
 
@@ -352,6 +355,7 @@ def simulate_top_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
     # day has at most K *unique* names from a single cohort. Sort factor DESCENDING so
     # `head(K)` picks the K HIGHEST; tie-break by ticker name for determinism. Within
     # an entry-day group, dedupe by ticker keeping the highest-factor row.
+
     s = (sig_with_factor
          .sort_values(["_entry_idx", "_factor", "ticker"], ascending=[True, False, True])
          .drop_duplicates(subset=["_entry_idx", "ticker"], keep="first")
@@ -372,6 +376,148 @@ def simulate_top_k(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
         s, prices, entry_idx_arr, exit_idx_arr, tk_col, balanced_weight,
         benchmark=benchmark,
     )
+
+
+def simulate_quantile_ls(sig: pd.DataFrame, prices: pd.DataFrame, condition: str,
+                         n_quantiles: int, entry_delay: int, hold_days: int = 1):
+    """Quantile long-short backtest with **overlapping cohorts** (Jegadeesh-Titman).
+
+    On each signal_date, rank tickers by ``factor_for_top_k(condition)`` and bucket
+    them into ``n_quantiles`` equal-population quantiles. Q1 = LOWEST factor (least
+    likely to be recalled); Qn = HIGHEST (most likely). Each ticker's bucket assignment
+    spawns an equal-weight position entered at close of (signal_date + entry_delay
+    trading days), held for ``hold_days`` trading days.
+
+    **Per-cohort pooling.** When ``hold_days > 1``, multiple cohorts overlap on the
+    same calendar day. On any day d, each per-quantile basket is the equal-weighted
+    mean of *cohort-level* Q_q daily returns:
+
+        portfolio_Q_q(d) = (1 / N_active(d)) Σ_{c active} [(1 / |Q_q_c|) Σ_{i ∈ Q_q_c} r_i(d)]
+
+    A ticker assigned to Q1 by 12 of 60 active cohorts and Q4 by 8 contributes 12×
+    to Q1's numerator and 8× to Q4's — relative frequency of quantile assignment
+    is preserved. (A naive per-name held-matrix would mark the ticker held in both
+    baskets equally and wash out the signal in small-universe / long-hold regimes.)
+
+    ``hold_days = 1`` recovers the daily-rebucket / no-overlap regime: each entry
+    day's cohort produces one day of P&L and is replaced the next day.
+
+    Returns ``(quantile_returns_df, long_short_series)``:
+
+      * ``quantile_returns_df``: shape (n_trading_days × n_quantiles), columns
+        ``"Q1"..."Q{n_quantiles}"``. Each column is the daily mean return of that
+        quantile's basket on each trading day (0 on no-position days).
+      * ``long_short_series``: daily return of the L/S portfolio defined as
+        ``Q1 − Qn`` — i.e. long the low-recall-prob bucket, short the high one.
+
+    Days where a signal_date's pool has fewer than ``n_quantiles`` rows are skipped
+    (can't form full N buckets cleanly). Within an entry-day group, ticker duplicates
+    are deduped keeping the highest-factor row (matching ``simulate_top_k``).
+    """
+    if entry_delay < 1:
+        raise ValueError("entry_delay must be >= 1")
+    if n_quantiles < 2:
+        raise ValueError("n_quantiles must be >= 2")
+    if hold_days < 1:
+        raise ValueError("hold_days must be >= 1")
+
+    trading_days = prices.index
+    cols = [f"Q{q}" for q in range(1, n_quantiles + 1)]
+    empty_df = pd.DataFrame(0.0, index=trading_days, columns=cols)
+    empty_ls = pd.Series(0.0, index=trading_days)
+
+    factor_vals = factor_for_top_k(sig, condition).to_numpy()
+    sig_with_factor = sig.assign(_factor=factor_vals)
+    sig_with_factor = sig_with_factor[sig_with_factor["ticker"].isin(prices.columns)]
+    sig_with_factor = sig_with_factor.dropna(subset=["_factor"])
+    if sig_with_factor.empty:
+        return empty_df, empty_ls
+
+    trading_days_np = trading_days.values.astype("datetime64[ns]")
+    n_days = len(trading_days)
+
+    sig_dates_np = sig_with_factor["signal_date"].values.astype("datetime64[ns]")
+    full_entry_idx = np.searchsorted(trading_days_np, sig_dates_np, side="right") + (entry_delay - 1)
+    sig_with_factor = sig_with_factor.assign(_entry_idx=full_entry_idx)
+    sig_with_factor = sig_with_factor[sig_with_factor["_entry_idx"] + 1 < n_days]
+    if sig_with_factor.empty:
+        return empty_df, empty_ls
+
+    # Dedupe ticker within entry_idx group (keep highest-factor row).
+    sig_dedup = (sig_with_factor
+                 .sort_values(["_entry_idx", "_factor", "ticker"], ascending=[True, False, True])
+                 .drop_duplicates(subset=["_entry_idx", "ticker"], keep="first")
+                 .copy())
+
+    # Per entry_idx group, qcut the factor into n_quantiles equal-population buckets.
+    # Q1 = LOWEST factor, Qn = HIGHEST. Use rank to break ties deterministically.
+    # Skip groups with fewer rows than n_quantiles — they can't be cleanly bucketed.
+    quantile_col = np.full(len(sig_dedup), np.nan)
+    sig_dedup_reset = sig_dedup.reset_index(drop=True)
+    for _, row_positions in sig_dedup_reset.groupby("_entry_idx").groups.items():
+        positions = np.asarray(row_positions)
+        if len(positions) < n_quantiles:
+            continue
+        factors = sig_dedup_reset.loc[positions, "_factor"]
+        ranked = factors.rank(method="first")
+        bins = pd.qcut(ranked, q=n_quantiles, labels=False) + 1
+        quantile_col[positions] = bins.values
+    sig_dedup_reset["_quantile"] = quantile_col
+    sig_dedup_reset = sig_dedup_reset.dropna(subset=["_quantile"])
+    if sig_dedup_reset.empty:
+        return empty_df, empty_ls
+    sig_dedup_reset["_quantile"] = sig_dedup_reset["_quantile"].astype(int)
+
+    # Per-cohort pooling: portfolio Q_q daily return is the average of cohort-level
+    # Q_q daily returns (not a single per-name held-matrix mean). See docstring for
+    # the formula. Cohort basket sizes are looked up via dict for speed in the
+    # per-row inner loop; weight accumulation uses a diff/cumsum trick so the
+    # held-window writes are O(rows) instead of O(rows × hold_days).
+    col_idx = {c: i for i, c in enumerate(prices.columns)}
+    daily_ret_mat = prices.pct_change(fill_method=None).to_numpy()
+    ret_filled = np.where(np.isnan(daily_ret_mat), 0.0, daily_ret_mat)
+
+    cohort_size = (sig_dedup_reset
+                   .groupby(["_entry_idx", "_quantile"])
+                   .size()
+                   .to_dict())  # (entry_idx, q) -> basket size
+
+    # Active-cohort count per day (denominator). A cohort is "active" on day d if
+    # entry_idx < d ≤ entry_idx + hold_days (matches P&L window of (entry, exit]).
+    unique_entries = sig_dedup_reset["_entry_idx"].drop_duplicates().to_numpy()
+    n_active_diff = np.zeros(n_days + 1, dtype=np.int64)
+    for ei in unique_entries:
+        e_exit = min(int(ei) + hold_days, n_days - 1)
+        if e_exit > ei:
+            n_active_diff[ei + 1] += 1
+            n_active_diff[e_exit + 1] -= 1
+    n_active = np.cumsum(n_active_diff)[:n_days]
+
+    quantile_returns = pd.DataFrame(0.0, index=trading_days, columns=cols)
+    for q in range(1, n_quantiles + 1):
+        s_q = sig_dedup_reset[sig_dedup_reset["_quantile"] == q]
+        if s_q.empty:
+            continue
+        weight_diff = np.zeros((n_days + 1, prices.shape[1]))
+        entries = s_q["_entry_idx"].to_numpy()
+        tk_idx = np.array([col_idx[t] for t in s_q["ticker"]])
+        for ei, ti in zip(entries, tk_idx):
+            ei_int = int(ei)
+            e_exit = min(ei_int + hold_days, n_days - 1)
+            if e_exit > ei_int:
+                w = 1.0 / cohort_size[(ei_int, q)]
+                weight_diff[ei_int + 1, ti] += w
+                weight_diff[e_exit + 1, ti] -= w
+        weight_mat = np.cumsum(weight_diff, axis=0)[:n_days]
+        weighted_ret = (weight_mat * ret_filled).sum(axis=1)
+        denom = np.where(n_active > 0, n_active, 1).astype(float)
+        basket_ret = np.where(n_active > 0, weighted_ret / denom, 0.0)
+        quantile_returns[f"Q{q}"] = basket_ret
+
+    # Long-short: long Q1 (low recall prob, expected outperformer), short Qn (high,
+    # expected underperformer). Daily LS return = Q1 - Qn.
+    long_short = quantile_returns["Q1"] - quantile_returns[f"Q{n_quantiles}"]
+    return quantile_returns, long_short
 
 
 # -----------------------------------------------------------------------------

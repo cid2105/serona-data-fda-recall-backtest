@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from strategy import (  # noqa: E402
     STRATEGIES, factor_for_condition, factor_for_top_k, normalize_manu,
-    simulate, simulate_top_k, sharpe, max_drawdown, basket_size_daily,
+    simulate, simulate_top_k, simulate_quantile_ls,
+    sharpe, max_drawdown, basket_size_daily,
     portfolio_turnover_daily, validate_prices, clean_prices,
 )
 
@@ -673,6 +674,144 @@ def test_top_k_skips_tickers_not_in_prices(synthetic_prices):
                              k=1, entry_delay=1, hold_days=1)
     assert len(s) == 1
     assert s["ticker"].iloc[0] == "A"
+
+
+# -----------------------------------------------------------------------------
+# simulate_quantile_ls — bucket tickers per signal_date and compute per-quantile
+# daily returns + the Q1−Qn long-short spread.
+# -----------------------------------------------------------------------------
+
+def test_quantile_ls_returns_correct_shape_and_columns():
+    """Output shape: quantile_returns has columns Q1..QN aligned with prices.index;
+    long_short is a Series with the same index."""
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    prices = pd.DataFrame(
+        {tk: [100.0] * 10 for tk in ["A", "B", "C", "D", "E", "SPY"]},
+        index=dates,
+    )
+    sigs = pd.DataFrame([
+        _signal(tk, "2025-01-02", p0=p) for tk, p in
+        zip(["A", "B", "C", "D", "E"], [0.1, 0.3, 0.5, 0.7, 0.9])
+    ])
+    qr, ls = simulate_quantile_ls(sigs, prices, "p0",
+                                  n_quantiles=5, entry_delay=1)
+    assert list(qr.columns) == ["Q1", "Q2", "Q3", "Q4", "Q5"]
+    assert qr.index.equals(dates)
+    assert ls.index.equals(dates)
+
+
+def test_quantile_ls_assigns_q1_lowest_and_qn_highest_factor():
+    """Q1 should hold the ticker with the LOWEST factor (A, p0=0.10); Qn the
+    HIGHEST (E, p0=0.90). Verified by giving each ticker a unique non-zero return
+    on the active day and checking the per-quantile mean matches the held ticker."""
+    dates = pd.bdate_range("2025-01-02", periods=4)
+    a_rets   = [None, 0.0, 0.01, 0.0]
+    b_rets   = [None, 0.0, 0.02, 0.0]
+    c_rets   = [None, 0.0, 0.03, 0.0]
+    d_rets   = [None, 0.0, 0.04, 0.0]
+    e_rets   = [None, 0.0, 0.05, 0.0]
+    spy_rets = [None] + [0.0] * 3
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "D": d_rets, "E": e_rets,
+         "SPY": spy_rets},
+        dates,
+    )
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p0=0.10),
+        _signal("B", dates[0], p0=0.30),
+        _signal("C", dates[0], p0=0.50),
+        _signal("D", dates[0], p0=0.70),
+        _signal("E", dates[0], p0=0.90),
+    ])
+    qr, ls = simulate_quantile_ls(sigs, prices, "p0",
+                                  n_quantiles=5, entry_delay=1)
+    # On d2 each quantile holds exactly one ticker; the daily-mean return equals
+    # that ticker's pct_change return.
+    assert qr["Q1"].iloc[2] == pytest.approx(0.01, abs=1e-12)  # A (lowest p0)
+    assert qr["Q2"].iloc[2] == pytest.approx(0.02, abs=1e-12)  # B
+    assert qr["Q3"].iloc[2] == pytest.approx(0.03, abs=1e-12)  # C
+    assert qr["Q4"].iloc[2] == pytest.approx(0.04, abs=1e-12)  # D
+    assert qr["Q5"].iloc[2] == pytest.approx(0.05, abs=1e-12)  # E (highest p0)
+    # LS spread Q1 − Q5 on the active day
+    assert ls.iloc[2] == pytest.approx(0.01 - 0.05, abs=1e-12)
+
+
+def test_quantile_ls_skips_dates_with_too_few_tickers_for_n_quantiles():
+    """If a signal_date has fewer tickers than n_quantiles, that date's signals
+    are skipped (can't form N distinct buckets cleanly)."""
+    dates = pd.bdate_range("2025-01-02", periods=4)
+    prices = pd.DataFrame(
+        {tk: [100.0] * 4 for tk in ["A", "B", "C", "SPY"]},
+        index=dates,
+    )
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p0=0.10),
+        _signal("B", dates[0], p0=0.50),
+        _signal("C", dates[0], p0=0.90),
+    ])
+    qr, ls = simulate_quantile_ls(sigs, prices, "p0",
+                                  n_quantiles=5, entry_delay=1)
+    # 3 tickers can't fill 5 quantiles → no positions, all-zero output.
+    assert (qr.values == 0.0).all()
+    assert (ls.values == 0.0).all()
+
+
+def test_quantile_ls_n_equals_2_splits_evenly():
+    """With n_quantiles=2 and 4 tickers, Q1 should hold the bottom 2 (A, B by p0)
+    and Q2 should hold the top 2 (C, D)."""
+    dates = pd.bdate_range("2025-01-02", periods=4)
+    a_rets   = [None, 0.0, 0.02, 0.0]
+    b_rets   = [None, 0.0, 0.04, 0.0]
+    c_rets   = [None, 0.0, 0.06, 0.0]
+    d_rets   = [None, 0.0, 0.08, 0.0]
+    spy_rets = [None] + [0.0] * 3
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "D": d_rets, "SPY": spy_rets},
+        dates,
+    )
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p0=0.10),  # → Q1
+        _signal("B", dates[0], p0=0.20),  # → Q1
+        _signal("C", dates[0], p0=0.80),  # → Q2
+        _signal("D", dates[0], p0=0.90),  # → Q2
+    ])
+    qr, _ = simulate_quantile_ls(sigs, prices, "p0",
+                                 n_quantiles=2, entry_delay=1)
+    # Q1 daily mean = mean(0.02, 0.04) = 0.03; Q2 = mean(0.06, 0.08) = 0.07.
+    assert qr["Q1"].iloc[2] == pytest.approx(0.03, abs=1e-12)
+    assert qr["Q2"].iloc[2] == pytest.approx(0.07, abs=1e-12)
+
+
+def test_quantile_ls_long_short_equals_q1_minus_qn():
+    """Invariant: long_short[d] == quantile_returns['Q1'][d] − quantile_returns['Qn'][d]
+    for every day, by construction."""
+    dates = pd.bdate_range("2025-01-02", periods=6)
+    a_rets   = [None, 0.0, 0.01, -0.02, 0.0, 0.0]
+    b_rets   = [None, 0.0, 0.02, 0.03,  0.0, 0.0]
+    c_rets   = [None, 0.0, 0.0,  0.01, -0.01, 0.0]
+    spy_rets = [None] + [0.0] * 5
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "SPY": spy_rets}, dates,
+    )
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p0=0.10),
+        _signal("B", dates[0], p0=0.50),
+        _signal("C", dates[0], p0=0.90),
+    ])
+    qr, ls = simulate_quantile_ls(sigs, prices, "p0",
+                                  n_quantiles=3, entry_delay=1)
+    expected = qr["Q1"] - qr["Q3"]
+    pd.testing.assert_series_equal(ls, expected, check_names=False, atol=1e-12)
+
+
+def test_quantile_ls_raises_on_invalid_args(synthetic_prices):
+    sigs = pd.DataFrame([_signal("A", "2025-01-02")])
+    with pytest.raises(ValueError, match="entry_delay"):
+        simulate_quantile_ls(sigs, synthetic_prices, "p0",
+                             n_quantiles=5, entry_delay=0)
+    with pytest.raises(ValueError, match="n_quantiles"):
+        simulate_quantile_ls(sigs, synthetic_prices, "p0",
+                             n_quantiles=1, entry_delay=1)
 
 
 # -----------------------------------------------------------------------------

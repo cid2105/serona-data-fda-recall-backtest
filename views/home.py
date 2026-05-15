@@ -69,7 +69,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-c_left, c_right = st.columns(2)
+c_left, c_mid, c_right = st.columns(3)
 _card_style = (
     f"border: 1px solid #DAE6F5; border-radius: 12px; padding: 1.1rem 1.3rem; "
     f"background: linear-gradient(180deg, #FFFFFF 0%, {BRAND_BLUE_TINT}55 100%);"
@@ -94,7 +94,7 @@ with c_left:
         unsafe_allow_html=True,
     )
 
-with c_right:
+with c_mid:
     st.markdown(
         f"""
         <div style="{_card_style}">
@@ -107,6 +107,25 @@ with c_right:
             economic direction as the threshold strategy, just ranked instead of
             cutoff-gated. Tunes <em>K</em>, <em>entry delay</em>, <em>holding period</em>,
             and the <em>trigger rule</em>.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with c_right:
+    st.markdown(
+        f"""
+        <div style="{_card_style}">
+          <div style="font-weight: 700; font-size: 1.1rem; color: {BRAND_BLUE}; margin-bottom: 0.4rem;">
+            <a href="/quantile" target="_self">Quantile L/S Backtest</a>
+          </div>
+          <div style="color: #334155; font-size: 0.92rem; line-height: 1.5;">
+            Each AE date, bucket tickers into <em>N</em> equal-population quantiles by
+            the trigger-rule factor. <strong>Long Q1</strong> (low recall prob) and
+            <strong>short Q<sub>N</sub></strong> (high recall prob). Self-funding L/S
+            pair — no external benchmark. Tunes <em>N</em>, <em>entry delay</em>,
+            <em>holding period</em>, and the <em>trigger rule</em>.
           </div>
         </div>
         """,

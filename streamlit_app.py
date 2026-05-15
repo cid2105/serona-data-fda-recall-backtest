@@ -23,6 +23,7 @@ if not check_password():
 home = st.Page("views/home.py",      title="Overview",          icon=":material/home:",        default=True)
 threshold = st.Page("views/threshold.py", title="Threshold Backtest", icon=":material/tune:",        url_path="threshold")
 top_k = st.Page("views/top_k.py",  title="Top-K Backtest",  icon=":material/leaderboard:", url_path="top-k")
+quantile = st.Page("views/quantile.py", title="Quantile L/S Backtest", icon=":material/stacked_bar_chart:", url_path="quantile")
 
-pg = st.navigation([home, threshold, top_k])
+pg = st.navigation([home, threshold, top_k, quantile])
 pg.run()

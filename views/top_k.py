@@ -34,7 +34,7 @@ with st.sidebar:
     rule_keys = list(TOP_K_RULES.keys())
     cond = st.selectbox(
         "Short Trigger Rule (ranking factor)", rule_keys,
-        index=rule_keys.index("p2"),
+        index=rule_keys.index("p0"),
         help="Single-class rules (p0, p1, p2) rank by that probability column. "
              "Multi-class rules (max(p0, p1), max(p0, p1, p2)) take the max across the "
              "listed columns. Top-K shorts the K names with the HIGHEST factor on "
@@ -44,14 +44,14 @@ with st.sidebar:
     k_max = max(1, universe_size)
     k = st.number_input(
         "K (number of names to short per AE date)",
-        min_value=1, max_value=int(k_max), value=10, step=1,
+        min_value=1, max_value=int(k_max), value=1, step=1,
         help="Per signal_date, short the K tickers with the highest factor.",
     )
     entry_delay = st.number_input("Entry delay (trading days after AE date)", 1, 60, 20, 1)
-    hold_days = st.number_input("Holding period (trading days)", 1, 120, 10, 1)
+    hold_days = st.number_input("Holding period (trading days)", 1, 120, 20, 1)
     benchmark = st.selectbox(
         "Long-leg benchmark",
-        ["SPY", "IHI"], index=0,
+        ["SPY", "IHI"], index=1,
         help="The long leg of the 50/50 market-neutral book. "
              "SPY = S&P 500. IHI = iShares US Medical Devices ETF "
              "(closer match to our medtech universe).",

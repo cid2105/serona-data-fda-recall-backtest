@@ -1274,3 +1274,229 @@ def test_top_k_strategy_full_synthetic_validation():
     # ---- Balanced book: 0.5 * short + 0.5 * SPY (SPY flat → 0.5 * short) ----
     expected_bal = [0.5 * v for v in expected_short]
     np.testing.assert_allclose(balanced.values, expected_bal, atol=1e-12)
+
+
+# -----------------------------------------------------------------------------
+# Minimal hand-checkable scenarios — 3 tickers × 10 dates, one per strategy type.
+# Layout is engineered so the expected position set / per-day P&L can be reasoned
+# out a priori from the (signal, threshold/k/quantile, return) tables.
+# -----------------------------------------------------------------------------
+
+def test_threshold_minimal_3_tickers_10_dates():
+    """Threshold: only tickers with p2 > 0.5 enter; entry_delay=1, hold_days=3.
+
+    Signals on day 0:
+        ticker  p2     enters?
+        A       0.90    YES (0.90 > 0.5)
+        B       0.20    no  (0.20 < 0.5)
+        C       0.70    YES (0.70 > 0.5)
+
+    Expected trades: 2 rows — one for A, one for C.
+    Trade window for each: entry day 1 → exit day 4 (hold_days=3).
+    short_book is nonzero on days 2..4 (P&L window is (entry, exit]).
+
+    Engineered returns (only days 2..4 matter for the P&L assertion):
+        day   A_ret   B_ret   C_ret
+         2    +0.01   +0.99   +0.03
+         3    +0.02   +0.99   +0.05
+         4    +0.04   +0.99   +0.07
+    B's returns are large to make it obvious B would change the answer if it
+    were (incorrectly) included — a sanity check on the threshold filter.
+    """
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    a_rets   = [None, 0.0, 0.01, 0.02, 0.04, 0.0, 0.0, 0.0, 0.0, 0.0]
+    b_rets   = [None, 0.0, 0.99, 0.99, 0.99, 0.0, 0.0, 0.0, 0.0, 0.0]  # never entered
+    c_rets   = [None, 0.0, 0.03, 0.05, 0.07, 0.0, 0.0, 0.0, 0.0, 0.0]
+    spy_rets = [None] + [0.0] * 9
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "SPY": spy_rets}, dates,
+    )
+
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p2=0.90),
+        _signal("B", dates[0], p2=0.20),
+        _signal("C", dates[0], p2=0.70),
+    ])
+    trades, short_book, balanced = simulate(
+        sigs, prices, "p2 > t", threshold=0.5, entry_delay=1, hold_days=3,
+    )
+
+    # ---- Positions: only A and C, with the correct entry/exit dates ----------
+    assert sorted(trades["ticker"].tolist()) == ["A", "C"]
+    assert (trades["trade_date"] == dates[1]).all()   # entry day = day 1
+    assert (trades["exit_date"]  == dates[4]).all()   # exit day  = day 1 + 3
+
+    # ---- Daily short_book: -mean(A_ret, C_ret) on days 2..4, 0 elsewhere -----
+    expected = [0.0, 0.0,
+                -(0.01 + 0.03) / 2,    # d2: -0.020
+                -(0.02 + 0.05) / 2,    # d3: -0.035
+                -(0.04 + 0.07) / 2,    # d4: -0.055
+                0.0, 0.0, 0.0, 0.0, 0.0]
+    np.testing.assert_allclose(short_book.values, expected, atol=1e-12)
+    # Balanced book = 0.5 * short + 0.5 * SPY (SPY flat → 0.5 * short).
+    np.testing.assert_allclose(balanced.values, [0.5 * v for v in expected], atol=1e-12)
+
+
+def test_top_k_minimal_3_tickers_10_dates():
+    """Top-K: rank tickers by p2 each entry day, short the K highest.
+
+    Signals on day 0:
+        ticker  p2
+        A       0.10  (lowest  → not picked)
+        B       0.50
+        C       0.90  (highest → always picked)
+
+    K=2 → short {B, C}. K=1 → short {C}.
+    entry_delay=1, hold_days=1: P&L window is just day 2 (= entry day 1 + 1).
+
+    Engineered returns on day 2: A=+0.10, B=+0.02, C=+0.04. A's return is large
+    so if the rule mistakenly picks lowest p2 (A) the basket P&L is obviously wrong.
+    """
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    a_rets   = [None, 0.0, 0.10] + [0.0] * 7
+    b_rets   = [None, 0.0, 0.02] + [0.0] * 7
+    c_rets   = [None, 0.0, 0.04] + [0.0] * 7
+    spy_rets = [None] + [0.0] * 9
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "SPY": spy_rets}, dates,
+    )
+
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p2=0.10),
+        _signal("B", dates[0], p2=0.50),
+        _signal("C", dates[0], p2=0.90),
+    ])
+
+    # ---- K=2: short the top-2 by p2 = {B, C} ---------------------------------
+    trades, short_book, _ = simulate_top_k(
+        sigs, prices, "p2", k=2, entry_delay=1, hold_days=1,
+    )
+    assert sorted(trades["ticker"].tolist()) == ["B", "C"]
+    assert (trades["trade_date"] == dates[1]).all()
+    assert (trades["exit_date"]  == dates[2]).all()
+    # Only day 2 has a position; short_book[d=2] = -mean(B_ret, C_ret).
+    expected = [0.0, 0.0, -(0.02 + 0.04) / 2] + [0.0] * 7
+    np.testing.assert_allclose(short_book.values, expected, atol=1e-12)
+
+    # ---- K=1: short only the highest by p2 = {C} -----------------------------
+    trades1, sb1, _ = simulate_top_k(
+        sigs, prices, "p2", k=1, entry_delay=1, hold_days=1,
+    )
+    assert trades1["ticker"].tolist() == ["C"]
+    expected1 = [0.0, 0.0, -0.04] + [0.0] * 7
+    np.testing.assert_allclose(sb1.values, expected1, atol=1e-12)
+
+
+def test_quantile_ls_minimal_3_tickers_10_dates():
+    """Quantile L/S: with 3 tickers and n_quantiles=3, each quantile holds 1 ticker.
+
+    Signals on day 0:
+        ticker  p2     quantile
+        A       0.10   Q1 (lowest factor)
+        B       0.50   Q2
+        C       0.90   Q3 (highest factor)
+
+    entry_delay=1, hold_days=1 → cohort is held on day 2 only.
+    Engineered returns on day 2: A=+0.02, B=+0.05, C=+0.10.
+
+    Expected:
+        Q1[d=2] = A_ret(2) = +0.02
+        Q2[d=2] = B_ret(2) = +0.05
+        Q3[d=2] = C_ret(2) = +0.10
+        LS [d=2] = Q1 − Q3 = +0.02 − +0.10 = −0.08
+    """
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    a_rets   = [None, 0.0, 0.02] + [0.0] * 7
+    b_rets   = [None, 0.0, 0.05] + [0.0] * 7
+    c_rets   = [None, 0.0, 0.10] + [0.0] * 7
+    spy_rets = [None] + [0.0] * 9
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "SPY": spy_rets}, dates,
+    )
+
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p2=0.10),
+        _signal("B", dates[0], p2=0.50),
+        _signal("C", dates[0], p2=0.90),
+    ])
+    qr, ls = simulate_quantile_ls(
+        sigs, prices, "p2", n_quantiles=3, entry_delay=1, hold_days=1,
+    )
+
+    assert list(qr.columns) == ["Q1", "Q2", "Q3"]
+    # Days 0, 1 and 3..9 have no positions → all-zero across quantiles.
+    for d in [0, 1, 3, 4, 5, 6, 7, 8, 9]:
+        assert qr.iloc[d].tolist() == [0.0, 0.0, 0.0]
+        assert ls.iloc[d] == 0.0
+    # Day 2: each quantile holds exactly one ticker → daily mean = that ticker's return.
+    assert qr["Q1"].iloc[2] == pytest.approx(0.02, abs=1e-12)   # A (lowest p2)
+    assert qr["Q2"].iloc[2] == pytest.approx(0.05, abs=1e-12)   # B
+    assert qr["Q3"].iloc[2] == pytest.approx(0.10, abs=1e-12)   # C (highest p2)
+    assert ls.iloc[2]       == pytest.approx(0.02 - 0.10, abs=1e-12)
+
+
+def test_quantile_ls_per_cohort_pooling_with_overlap():
+    """Quantile L/S with hold_days > 1: verifies overlapping cohorts use
+    per-cohort pooling (not a per-name boolean held-matrix).
+
+    Two signal dates with OPPOSITE quantile assignments for A and C:
+        signal day 0:  A.p2=0.10 → Q1   B.p2=0.50 → Q2   C.p2=0.90 → Q3
+        signal day 1:  A.p2=0.90 → Q3   B.p2=0.50 → Q2   C.p2=0.10 → Q1
+
+    entry_delay=1, hold_days=2. Cohort P&L windows are (entry, exit]:
+        Cohort 1 (sig day 0 → entry day 1, exit day 3): held on days 2, 3
+        Cohort 2 (sig day 1 → entry day 2, exit day 4): held on days 3, 4
+
+    Returns (irrelevant days zero):
+        day   A_ret    B_ret    C_ret
+         2    +0.02    +0.05    +0.10
+         3    +0.04    +0.05    +0.10
+         4    +0.06    +0.05    +0.10
+
+    Expected portfolio Q1/Q3 daily returns (N_active = active cohort count):
+        d=2: cohort 1 only (N=1).
+             Q1 = A_ret(2) = +0.02     Q3 = C_ret(2) = +0.10     LS = −0.08
+        d=3: both cohorts (N=2). Each cohort's Q_q basket is one ticker.
+             Q1 = mean(A_ret, C_ret) = +0.07
+             Q3 = mean(C_ret, A_ret) = +0.07
+             LS = 0.00   (signals conflict → cancels — the point of per-cohort pooling)
+        d=4: cohort 2 only (N=1).
+             Q1 = C_ret(4) = +0.10     Q3 = A_ret(4) = +0.06     LS = +0.04
+    """
+    dates = pd.bdate_range("2025-01-02", periods=10)
+    a_rets   = [None, 0.0, 0.02, 0.04, 0.06] + [0.0] * 5
+    b_rets   = [None, 0.0, 0.05, 0.05, 0.05] + [0.0] * 5
+    c_rets   = [None, 0.0, 0.10, 0.10, 0.10] + [0.0] * 5
+    spy_rets = [None] + [0.0] * 9
+    prices = _prices_from_returns(
+        {"A": a_rets, "B": b_rets, "C": c_rets, "SPY": spy_rets}, dates,
+    )
+
+    sigs = pd.DataFrame([
+        _signal("A", dates[0], p2=0.10),
+        _signal("B", dates[0], p2=0.50),
+        _signal("C", dates[0], p2=0.90),
+        _signal("A", dates[1], p2=0.90),
+        _signal("B", dates[1], p2=0.50),
+        _signal("C", dates[1], p2=0.10),
+    ])
+    qr, ls = simulate_quantile_ls(
+        sigs, prices, "p2", n_quantiles=3, entry_delay=1, hold_days=2,
+    )
+
+    assert qr["Q1"].iloc[2] == pytest.approx(0.02, abs=1e-12)
+    assert qr["Q3"].iloc[2] == pytest.approx(0.10, abs=1e-12)
+    assert ls.iloc[2]       == pytest.approx(-0.08, abs=1e-12)
+
+    assert qr["Q1"].iloc[3] == pytest.approx(0.07, abs=1e-12)
+    assert qr["Q3"].iloc[3] == pytest.approx(0.07, abs=1e-12)
+    assert ls.iloc[3]       == pytest.approx(0.0,  abs=1e-12)
+
+    assert qr["Q1"].iloc[4] == pytest.approx(0.10, abs=1e-12)
+    assert qr["Q3"].iloc[4] == pytest.approx(0.06, abs=1e-12)
+    assert ls.iloc[4]       == pytest.approx(0.04, abs=1e-12)
+
+    # Days outside the union of hold windows have no positions.
+    for d in [0, 1, 5, 6, 7, 8, 9]:
+        assert qr.iloc[d].tolist() == [0.0, 0.0, 0.0]
+        assert ls.iloc[d] == 0.0

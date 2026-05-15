@@ -77,7 +77,10 @@ def factor_for_condition(sig: pd.DataFrame, condition: str) -> pd.Series:
 # in that study and have been removed. ``factor_for_top_k`` still accepts those keys
 # for diagnostic use, but the UI dropdowns won't surface them.
 TOP_K_RULES: dict[str, str] = {
+    "p0":              "p0",
+    "p1":              "p1",
     "p2":              "p2",
+    "max(p0, p1)":     "max(p0, p1)",
     "max(p0, p1, p2)": "max(p0, p1, p2)",
 }
 
